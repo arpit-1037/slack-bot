@@ -20,7 +20,54 @@ def clean_text(task_text: str) -> str:
     ).strip()
 
 
-# ── 2. Git Context ─────────────────────────────────────────────────────────────
+# ── 2. Detect if task is asking about git changes ──────────────────────────────
+def is_git_query(task: str) -> bool:
+    keywords = [
+        "last commit", "changes", "diff", "what changed",
+        "committed", "modified", "recent changes", "last committed",
+        "what did i change", "show changes", "git"
+    ]
+    return any(k in task.lower() for k in keywords)
+
+
+# ── 3. Return raw git diff directly without AI ────────────────────────────────
+def get_raw_diff() -> str:
+    try:
+        commits = subprocess.check_output(
+            ["git", "log", "--oneline", "-3"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+
+        files = subprocess.check_output(
+            ["git", "diff", "--name-only", "HEAD~1", "HEAD"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+
+        diff = subprocess.check_output(
+            ["git", "diff", "HEAD~1", "HEAD"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+
+        return f"""*Last 3 Commits:*
+```
+{commits}
+```
+
+*Files Changed:*
+```
+{files}
+```
+
+*Exact Diff:*
+```diff
+{diff}
+```"""
+
+    except Exception as e:
+        return f"Could not fetch git diff: {e}"
+
+
+# ── 4. Git Context for AI ──────────────────────────────────────────────────────
 def get_git_context() -> str:
     context = []
 
@@ -66,7 +113,7 @@ def get_git_context() -> str:
     return "\n\n".join(context)
 
 
-# ── 3. Read Current Codebase ───────────────────────────────────────────────────
+# ── 5. Read Current Codebase ───────────────────────────────────────────────────
 def read_codebase(project_path: str = ".") -> str:
     code_context = []
     for filename in sorted(os.listdir(project_path)):
@@ -81,7 +128,7 @@ def read_codebase(project_path: str = ".") -> str:
     return "\n\n".join(code_context) if code_context else "No Python files found."
 
 
-# ── 4. Web Search ──────────────────────────────────────────────────────────────
+# ── 6. Web Search ──────────────────────────────────────────────────────────────
 def search_web(query: str) -> str:
     try:
         print(f"Searching web for: {query}")
@@ -98,13 +145,17 @@ def search_web(query: str) -> str:
         return "Web search unavailable."
 
 
-# ── 5. Build Smart Prompt ──────────────────────────────────────────────────────
+# ── 7. Build Smart Prompt ──────────────────────────────────────────────────────
 def build_prompt(task: str, git_context: str, code_context: str, search_context: str) -> str:
-    return f"""You are a smart coding assistant integrated into Slack for this specific project.
-You have full context of the project — git history, current code, and real-time web search results.
+    return f"""You are a direct, no-nonsense coding assistant in Slack.
 
-Always answer specifically based on THIS project's code and git history.
-Never give generic answers — always reference the actual code and recent changes.
+STRICT RULES:
+- Answer ONLY what was asked — nothing more
+- If asked for code → paste the ACTUAL code, no paraphrasing
+- If asked a general question → answer directly, ignore git/code context
+- Only reference git history or code when the task is specifically about code or bugs
+- Never explain your process or steps — just give the answer
+- Never say "based on the context..." or "I will now..." — just answer
 
 ============================
 GIT HISTORY & RECENT CHANGES
@@ -124,18 +175,10 @@ WEB SEARCH RESULTS
 ============================
 TASK
 ============================
-{task}
-
-Format your response for Slack:
-- Use *bold* for headings
-- Use bullet points for steps
-- Use ``` for any code blocks
-- Reference specific files and line numbers where possible
-- If the bug relates to a recent commit, mention which commit caused it
-- Be concise and direct"""
+{task}"""
 
 
-# ── 6. AI Solvers ──────────────────────────────────────────────────────────────
+# ── 8. AI Solvers ──────────────────────────────────────────────────────────────
 def solve_with_groq(prompt: str) -> str:
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     response = client.chat.completions.create(
@@ -163,17 +206,21 @@ def solve_with_openai(prompt: str) -> str:
     return response.choices[0].message.content
 
 
-# ── 7. Main Solver ─────────────────────────────────────────────────────────────
+# ── 9. Main Solver ─────────────────────────────────────────────────────────────
 def solve_task(task_text: str) -> str:
     clean = clean_text(task_text)
 
     if not clean:
         return "I did not receive a task. Please mention me with a task description."
 
-    print("\n--- New Task ---")
-    print(f"Task: {clean}")
+    print(f"\n--- New Task ---\nTask: {clean}")
 
-    # Gather all context
+    # If asking about git changes — return raw diff directly, skip AI
+    if is_git_query(clean):
+        print("Git query detected — returning raw diff.")
+        return get_raw_diff()
+
+    # Gather all context for AI
     print("Reading git context...")
     git_context = get_git_context()
 
