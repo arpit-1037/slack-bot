@@ -1,75 +1,217 @@
-# claude_solver.py — Gemini first, falls back to OpenAI if quota exceeded
+# claude_solver.py — Groq first, then Gemini, then OpenAI fallback chain
+# Git-Aware + Web Search + AI Fallback
 
 import os
+import subprocess
 from google import genai
 from openai import OpenAI
+from groq import Groq
 from dotenv import load_dotenv
+from ddgs import DDGS
 
 load_dotenv()
 
 
+# ── 1. Clean Slack @mention from task text ─────────────────────────────────────
 def clean_text(task_text: str) -> str:
-    cleaned = " ".join(
+    return " ".join(
         word for word in task_text.split()
         if not word.startswith("<@")
     ).strip()
-    return cleaned
 
 
-PROMPT_TEMPLATE = """You are a task-solving assistant integrated into Slack.
-When someone assigns you a task, provide a clear and actionable solution.
+# ── 2. Git Context ─────────────────────────────────────────────────────────────
+def get_git_context() -> str:
+    context = []
+
+    try:
+        commits = subprocess.check_output(
+            ["git", "log", "--oneline", "-5"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        context.append(f"LAST 5 COMMITS:\n{commits}")
+    except Exception:
+        context.append("COMMITS: Git history unavailable.")
+
+    try:
+        changed_files = subprocess.check_output(
+            ["git", "diff", "--name-only", "HEAD~1", "HEAD"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        context.append(f"FILES CHANGED IN LAST COMMIT:\n{changed_files}")
+    except Exception:
+        context.append("CHANGED FILES: Unavailable (possibly first commit).")
+
+    try:
+        diff = subprocess.check_output(
+            ["git", "diff", "HEAD~1", "HEAD"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()[:3000]
+        context.append(f"RECENT DIFF:\n{diff}")
+    except Exception:
+        context.append("DIFF: Unavailable.")
+
+    try:
+        uncommitted = subprocess.check_output(
+            ["git", "status", "--short"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        if uncommitted:
+            context.append(f"CURRENTLY MODIFIED (UNCOMMITTED):\n{uncommitted}")
+        else:
+            context.append("UNCOMMITTED CHANGES: None — working tree is clean.")
+    except Exception:
+        context.append("UNCOMMITTED: Unavailable.")
+
+    return "\n\n".join(context)
+
+
+# ── 3. Read Current Codebase ───────────────────────────────────────────────────
+def read_codebase(project_path: str = ".") -> str:
+    code_context = []
+    for filename in sorted(os.listdir(project_path)):
+        if filename.endswith(".py"):
+            filepath = os.path.join(project_path, filename)
+            try:
+                with open(filepath, "r") as f:
+                    content = f.read()
+                code_context.append(f"=== {filename} ===\n{content}")
+            except Exception:
+                code_context.append(f"=== {filename} === (could not read)")
+    return "\n\n".join(code_context) if code_context else "No Python files found."
+
+
+# ── 4. Web Search ──────────────────────────────────────────────────────────────
+def search_web(query: str) -> str:
+    try:
+        print(f"Searching web for: {query}")
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=3):
+                results.append(f"- {r['title']}: {r['body']}")
+        if results:
+            print(f"Found {len(results)} search results.")
+            return "\n".join(results)
+        return "No search results found."
+    except Exception as e:
+        print(f"Web search failed: {e}")
+        return "Web search unavailable."
+
+
+# ── 5. Build Smart Prompt ──────────────────────────────────────────────────────
+def build_prompt(task: str, git_context: str, code_context: str, search_context: str) -> str:
+    return f"""You are a smart coding assistant integrated into Slack for this specific project.
+You have full context of the project — git history, current code, and real-time web search results.
+
+Always answer specifically based on THIS project's code and git history.
+Never give generic answers — always reference the actual code and recent changes.
+
+============================
+GIT HISTORY & RECENT CHANGES
+============================
+{git_context}
+
+============================
+CURRENT PROJECT CODE
+============================
+{code_context}
+
+============================
+WEB SEARCH RESULTS
+============================
+{search_context}
+
+============================
+TASK
+============================
+{task}
 
 Format your response for Slack:
 - Use *bold* for headings
 - Use bullet points for steps
 - Use ``` for any code blocks
-- Be concise and direct
-
-Task assigned to me: {task}"""
-
-
-def solve_with_gemini(task_text: str) -> str:
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-    response = client.models.generate_content(
-        model="gemini-1.5-flash",
-        contents=PROMPT_TEMPLATE.format(task=task_text)
-    )
-    return response.text
+- Reference specific files and line numbers where possible
+- If the bug relates to a recent commit, mention which commit caused it
+- Be concise and direct"""
 
 
-def solve_with_openai(task_text: str) -> str:
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# ── 6. AI Solvers ──────────────────────────────────────────────────────────────
+def solve_with_groq(prompt: str) -> str:
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "user", "content": PROMPT_TEMPLATE.format(task=task_text)}
-        ]
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": prompt}]
     )
     return response.choices[0].message.content
 
 
+def solve_with_gemini(prompt: str) -> str:
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt
+    )
+    return response.text
+
+
+def solve_with_openai(prompt: str) -> str:
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.choices[0].message.content
+
+
+# ── 7. Main Solver ─────────────────────────────────────────────────────────────
 def solve_task(task_text: str) -> str:
     clean = clean_text(task_text)
 
     if not clean:
         return "I did not receive a task. Please mention me with a task description."
 
-    # 1. Try Gemini first
+    print("\n--- New Task ---")
+    print(f"Task: {clean}")
+
+    # Gather all context
+    print("Reading git context...")
+    git_context = get_git_context()
+
+    print("Reading codebase...")
+    code_context = read_codebase()
+
+    print("Searching web...")
+    search_context = search_web(clean)
+
+    # Build smart prompt
+    prompt = build_prompt(clean, git_context, code_context, search_context)
+
+    # Try Groq FIRST (free, generous limits)
+    try:
+        print("Trying Groq...")
+        result = solve_with_groq(prompt)
+        print("Groq responded.")
+        return result
+    except Exception as e:
+        print(f"Groq failed: {e}")
+
+    # Fallback to Gemini
     try:
         print("Trying Gemini...")
-        result = solve_with_gemini(clean)
+        result = solve_with_gemini(prompt)
         print("Gemini responded.")
         return result
-
     except Exception as e:
-        print(f"Gemini failed: {e} — falling back to OpenAI...")
+        print(f"Gemini failed: {e}")
 
-    # 2. Fallback to OpenAI
+    # Fallback to OpenAI
     try:
-        result = solve_with_openai(clean)
+        print("Trying OpenAI...")
+        result = solve_with_openai(prompt)
         print("OpenAI responded.")
         return result
-
     except Exception as e:
-        print(f"OpenAI also failed: {e}")
-        return f"Both Gemini and OpenAI are unavailable right now. Error: {str(e)}"
+        print(f"OpenAI failed: {e}")
+
+    # All failed
+    return "Sorry, all AI services are temporarily unavailable. Please try again in a few minutes."
