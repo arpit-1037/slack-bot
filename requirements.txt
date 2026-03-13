@@ -1,0 +1,4 @@
+flask==3.0.0
+slack-sdk==3.26.1
+anthropic==0.21.3
+python-dotenv==1.0.0
