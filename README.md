@@ -1,3 +1,6 @@
+python3 app.py 
+
+ngrok http 3000
 # 🤖 Slack Claude Bot
 
 Automatically solves tasks when you're @mentioned in Slack, powered by Claude AI.

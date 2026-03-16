@@ -47,7 +47,6 @@ def classify_intent(task: str) -> str:
 
     if is_git_query(task_lower):
         return "git"
-
     generic_code_signals = [
         "write code", "code in", "example in", "program in",
         "reverse string", "java code", "python code", "javascript code",
