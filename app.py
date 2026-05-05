@@ -90,11 +90,16 @@ def slack_events():
         post_message(channel, thread_ts, f"⏳ <@{user}> On it! Solving your task...")
 
         # 6. Save task to database
-        task_id = save_task(slack_user=user, channel=channel, task_text=task_text)
+        task_id = save_task(slack_user=user, channel=channel, task_text=task_text, thread_ts=thread_ts)
 
         # 7. Send to Claude
         try:
-            solution = solve_task(task_text)
+            solution = solve_task(
+                task_text,
+                thread_ts=thread_ts,
+                channel=channel,
+                slack_user=user,
+            )
             status   = "solved"
             logging.info(f"Task {task_id} solved successfully.")
         except Exception as e:
@@ -123,4 +128,4 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 3000))
     print(f"🚀 Bot running on http://localhost:{port}")
     print(f"📡 Slack events endpoint: http://localhost:{port}/slack/events")
-    app.run(port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False)

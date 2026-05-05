@@ -1,7 +1,10 @@
 # claude_solver.py - Groq first, then Gemini, then OpenAI fallback chain
 # Git-aware + web search + AI fallback
 
+import logging
 import os
+import re
+import shlex
 import subprocess
 
 from ddgs import DDGS
@@ -10,7 +13,13 @@ from google import genai
 from groq import Groq
 from openai import OpenAI
 
+from database import get_conversation_history
+
 load_dotenv()
+
+
+MAX_GIT_OUTPUT_CHARS = 3500
+QUOTE_CHARS = "'\"“”‘’"
 
 
 # 1. Clean Slack @mention from task text
@@ -35,6 +44,47 @@ def is_git_query(task: str) -> bool:
     return any(keyword in task_lower for keyword in keywords)
 
 
+def extract_git_commands(task: str) -> list[list[str]]:
+    """Extract explicit `git ...` commands without invoking a shell."""
+    commands = []
+    for segment in re.split(r"(?:\n|&&|;)", task):
+        cleaned = segment.strip().strip("`")
+        if cleaned.startswith("$ "):
+            cleaned = cleaned[2:].strip()
+        git_index = cleaned.find("git ")
+        if git_index == -1:
+            continue
+        cleaned = cleaned[git_index:]
+        try:
+            parts = shlex.split(cleaned)
+        except ValueError:
+            continue
+        if len(parts) > 1 and parts[0] == "git":
+            commands.append(parts[1:])
+    return commands
+
+
+def is_git_action_query(task: str) -> bool:
+    task_lower = task.lower()
+    if extract_git_commands(task):
+        return True
+
+    action_patterns = [
+        r"\bstage\b", r"\badd\b", r"\bcommit\b", r"\bpush\b",
+        r"\bpull\b", r"\bfetch\b", r"\bstash\b", r"\bmerge\b",
+        r"\brebase\b", r"\btag\b", r"\bcheckout\b", r"\bswitch\b",
+        r"\brestore\b", r"\breset\b", r"\brevert\b", r"\bcherry[- ]pick\b",
+    ]
+    read_only_patterns = [
+        r"\blast commit\b", r"\bcommit history\b", r"\bshow .*commit\b",
+        r"\bwhat .*commit\b", r"\bwhat changed\b", r"\bdiff\b", r"\bstatus\b",
+    ]
+    return (
+        any(re.search(pattern, task_lower) for pattern in action_patterns)
+        and not any(re.search(pattern, task_lower) for pattern in read_only_patterns)
+    )
+
+
 # 3. Intent routing
 def classify_intent(task: str) -> str:
     task_lower = task.lower().strip()
@@ -45,6 +95,9 @@ def classify_intent(task: str) -> str:
     }
     if task_lower in greeting_words:
         return "greeting"
+
+    if is_git_action_query(task_lower):
+        return "git_action"
 
     if is_git_query(task_lower):
         return "git"
@@ -85,6 +138,63 @@ def run_git_command(args: list[str]) -> str:
         ).decode().strip()
     except Exception:
         return ""
+
+
+def run_git_action_command(args: list[str], timeout: int = 120) -> tuple[bool, str]:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        result = subprocess.run(
+            ["git"] + args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "Command timed out."
+    except Exception as error:
+        return False, str(error)
+
+    output = "\n".join(
+        part.strip() for part in (result.stdout, result.stderr) if part.strip()
+    )
+    return result.returncode == 0, output or "Command completed."
+
+
+def has_git_changes(args: list[str]) -> bool:
+    try:
+        result = subprocess.run(
+            ["git"] + args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return False
+    return result.returncode == 1
+
+
+def has_staged_changes() -> bool:
+    return has_git_changes(["diff", "--cached", "--quiet"])
+
+
+def has_worktree_changes() -> bool:
+    if has_git_changes(["diff", "--quiet"]):
+        return True
+    return bool(run_git_command(["ls-files", "--others", "--exclude-standard"]))
+
+
+def truncate_git_output(output: str) -> str:
+    if len(output) <= MAX_GIT_OUTPUT_CHARS:
+        return output
+    return output[:MAX_GIT_OUTPUT_CHARS] + "\n... output truncated ..."
+
+
+def format_git_result(args: list[str], ok: bool, output: str) -> str:
+    status = "OK" if ok else "FAILED"
+    command = shlex.join(["git"] + args)
+    return f"*{status}:* `{command}`\n```\n{truncate_git_output(output)}\n```"
 
 
 def is_git_repo() -> bool:
@@ -152,6 +262,111 @@ def get_raw_diff() -> str:
 ```"""
     except Exception as error:
         return f"Could not fetch git diff: {error}"
+
+
+def extract_commit_message(task: str) -> str:
+    patterns = [
+        rf"(?:-m|--message)\s+[{QUOTE_CHARS}]([^{QUOTE_CHARS}]+)[{QUOTE_CHARS}]",
+        rf"(?:commit message|message|msg)\s*[:=]\s*[{QUOTE_CHARS}]([^{QUOTE_CHARS}]+)[{QUOTE_CHARS}]",
+        r"(?:commit message|message|msg)\s*[:=]\s*(.+)$",
+        rf"\bwith\s+(?:commit\s+)?(?:message|msg)\s+[{QUOTE_CHARS}]([^{QUOTE_CHARS}]+)[{QUOTE_CHARS}]",
+        rf"\bcommit\b.*\b(?:message|msg)\s+[{QUOTE_CHARS}]([^{QUOTE_CHARS}]+)[{QUOTE_CHARS}]",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, task, re.IGNORECASE)
+        if match:
+            return match.group(1).strip().strip(": ")
+    return ""
+
+
+def suggest_commit_message() -> str:
+    files = run_git_command(["diff", "--cached", "--name-only"]).splitlines()
+    if not files:
+        files = run_git_command(["diff", "--name-only"]).splitlines()
+
+    if not files:
+        return "Update project"
+    if len(files) == 1:
+        return f"Update {files[0]}"
+    if len(files) <= 3:
+        return "Update " + ", ".join(files)
+    return f"Update {len(files)} files"
+
+
+def command_has_commit_message(args: list[str]) -> bool:
+    return any(
+        arg == "-m"
+        or arg == "--message"
+        or arg.startswith("-m")
+        or arg.startswith("--message=")
+        or (arg.startswith("-") and not arg.startswith("--") and "m" in arg[1:])
+        for arg in args
+    )
+
+
+def normalize_git_command(args: list[str]) -> list[str]:
+    if args[:2] == ["commit", "command"]:
+        args = ["commit"] + args[2:]
+    if args and args[0] == "commit" and not command_has_commit_message(args):
+        args = args + ["-m", suggest_commit_message()]
+    return args
+
+
+def run_git_commands(commands: list[list[str]]) -> str:
+    if not is_git_repo():
+        return "Could not run git command: current directory is not a git repository."
+    if not commands:
+        return "No git command found. Use an explicit command like `git status` or ask me to commit/push changes."
+
+    results = []
+    normalized_commands = []
+    for args in commands:
+        args = normalize_git_command(args)
+        if args and args[0] == "commit" and not has_staged_changes() and has_worktree_changes():
+            normalized_commands.append(["add", "-A"])
+        normalized_commands.append(args)
+
+    for args in normalized_commands:
+        ok, output = run_git_action_command(args)
+        results.append(format_git_result(args, ok, output))
+        if not ok:
+            break
+    return "\n\n".join(results)
+
+
+def run_natural_git_action(task: str) -> str:
+    task_lower = task.lower()
+    commands = []
+
+    wants_commit = bool(re.search(r"\bcommit\b", task_lower))
+    wants_push = bool(re.search(r"\bpush\b", task_lower))
+    wants_stage = bool(re.search(r"\b(stage|add)\b", task_lower))
+
+    if re.search(r"\bpull\b", task_lower):
+        commands.append(["pull"])
+    if re.search(r"\bfetch\b", task_lower):
+        commands.append(["fetch"])
+    if re.search(r"\bstash\b", task_lower):
+        commands.append(["stash", "push"])
+
+    if wants_stage or (wants_commit and "staged" not in task_lower):
+        commands.append(["add", "-A"])
+
+    if wants_commit:
+        message = extract_commit_message(task) or suggest_commit_message()
+        commands.append(["commit", "-m", message])
+
+    if wants_push:
+        commands.append(["push"])
+
+    return run_git_commands(commands)
+
+
+def run_git_action(task: str) -> str:
+    explicit_commands = extract_git_commands(task)
+    if explicit_commands:
+        return run_git_commands(explicit_commands)
+    return run_natural_git_action(task)
 
 
 # 6. Git context for AI
@@ -233,14 +448,7 @@ def search_web(query: str) -> str:
 
 
 # 9. Build smart prompt
-def build_prompt(
-    task: str,
-    intent: str,
-    git_context: str,
-    code_context: str,
-    search_context: str,
-) -> str:
-    return f"""You are a direct, no-nonsense coding assistant in Slack.
+SYSTEM_PROMPT = """You are a direct, no-nonsense coding assistant in Slack.
 
 STRICT RULES:
 - Answer ONLY what was asked - nothing more
@@ -252,8 +460,17 @@ STRICT RULES:
 - Only use web results when the task needs external or current information
 - Never explain your process or steps - just give the answer
 - Never say "based on the context..." or "I will now..." - just answer
+- Earlier user/assistant turns in this conversation are prior thread history — use them for context when the user refers back to them"""
 
-============================
+
+def build_user_message(
+    task: str,
+    intent: str,
+    git_context: str,
+    code_context: str,
+    search_context: str,
+) -> str:
+    return f"""============================
 DETECTED INTENT
 ============================
 {intent}
@@ -279,18 +496,56 @@ TASK
 {task}"""
 
 
+def build_messages(
+    task: str,
+    thread_ts: str | None,
+    channel: str | None,
+    slack_user: str | None,
+    intent: str,
+    git_context: str,
+    code_context: str,
+    search_context: str,
+) -> list[dict]:
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    history = get_conversation_history(thread_ts, channel, slack_user)
+    log.info(
+        "History lookup: thread_ts=%s channel=%s user=%s -> %d prior turn(s)",
+        thread_ts, channel, slack_user, len(history),
+    )
+    if history:
+        print(f"Loaded {len(history)} prior turn(s) of conversation context.")
+    for past_task, past_solution in history:
+        messages.append({"role": "user", "content": clean_text(past_task)})
+        messages.append({"role": "assistant", "content": past_solution})
+    messages.append({
+        "role": "user",
+        "content": build_user_message(task, intent, git_context, code_context, search_context),
+    })
+    return messages
+
+
 # 10. AI solvers
-def solve_with_groq(prompt: str) -> str:
+def solve_with_groq(messages: list[dict]) -> str:
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     response = client.chat.completions.create(
         model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
+        messages=messages,
     )
     return response.choices[0].message.content
 
 
-def solve_with_gemini(prompt: str) -> str:
+def solve_with_gemini(messages: list[dict]) -> str:
+    # Gemini's generate_content takes a single prompt here; flatten while preserving roles
     client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    system = next((m["content"] for m in messages if m["role"] == "system"), "")
+    convo_parts = []
+    for m in messages:
+        if m["role"] == "system":
+            continue
+        speaker = "User" if m["role"] == "user" else "Assistant"
+        convo_parts.append(f"{speaker}: {m['content']}")
+    convo = "\n\n".join(convo_parts)
+    prompt = f"{system}\n\n{convo}" if system else convo
     response = client.models.generate_content(
         model="gemini-2.0-flash",
         contents=prompt,
@@ -298,17 +553,22 @@ def solve_with_gemini(prompt: str) -> str:
     return response.text
 
 
-def solve_with_openai(prompt: str) -> str:
+def solve_with_openai(messages: list[dict]) -> str:
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     response = client.chat.completions.create(
         model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}],
+        messages=messages,
     )
     return response.choices[0].message.content
 
 
 # 11. Main solver
-def solve_task(task_text: str) -> str:
+def solve_task(
+    task_text: str,
+    thread_ts: str | None = None,
+    channel: str | None = None,
+    slack_user: str | None = None,
+) -> str:
     clean = clean_text(task_text)
 
     if not clean:
@@ -316,8 +576,16 @@ def solve_task(task_text: str) -> str:
 
     print(f"\n--- New Task ---\nTask: {clean}")
 
+    if is_git_action_query(clean):
+        print("Git action detected before AI routing - running git command.")
+        return run_git_action(clean)
+
     intent = classify_intent(clean)
     print(f"Detected intent: {intent}")
+
+    if intent == "git_action":
+        print("Git action detected - running git command.")
+        return run_git_action(clean)
 
     if intent == "git":
         print("Git query detected - returning raw diff.")
@@ -337,11 +605,14 @@ def solve_task(task_text: str) -> str:
         print("Searching web...")
         search_context = search_web(clean)
 
-    prompt = build_prompt(clean, intent, git_context, code_context, search_context)
+    messages = build_messages(
+        clean, thread_ts, channel, slack_user,
+        intent, git_context, code_context, search_context,
+    )
 
     try:
         print("Trying Groq...")
-        result = solve_with_groq(prompt)
+        result = solve_with_groq(messages)
         print("Groq responded.")
         return result
     except Exception as error:
@@ -349,7 +620,7 @@ def solve_task(task_text: str) -> str:
 
     try:
         print("Trying Gemini...")
-        result = solve_with_gemini(prompt)
+        result = solve_with_gemini(messages)
         print("Gemini responded.")
         return result
     except Exception as error:
@@ -357,7 +628,7 @@ def solve_task(task_text: str) -> str:
 
     try:
         print("Trying OpenAI...")
-        result = solve_with_openai(prompt)
+        result = solve_with_openai(messages)
         print("OpenAI responded.")
         return result
     except Exception as error:
