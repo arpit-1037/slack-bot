@@ -68,13 +68,8 @@ class TaskExecutor:
             git_context = self.git_tool.get_git_context()
 
         if plan.needs_repository_context:
-            log.info("request_id=%s selecting repository context", request_id)
-            selection = self.repository_tool.select_context(
-                self.git_tool.repo_path,
-                plan.clean_task,
-                request_id=request_id,
-            )
-            code_context = selection.context
+            log.info("request_id=%s scanning repository context", request_id)
+            code_context = self.repository_tool.read_codebase(self.git_tool.repo_path)
 
         if plan.needs_web_search:
             log.info("request_id=%s collecting web search context", request_id)
