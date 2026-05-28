@@ -11,6 +11,8 @@ IGNORED_DIRECTORIES = {
     "venv",
     "dist",
     "build",
+    "__pycache__",
+    "pycache",
 }
 
 SUPPORTED_EXTENSIONS = {
@@ -20,6 +22,8 @@ SUPPORTED_EXTENSIONS = {
     ".php",
     ".json",
     ".md",
+    ".yaml",
+    ".yml",
 }
 
 SUPPORTED_FILENAMES = {
@@ -32,7 +36,7 @@ class MetadataExtractor:
 
     def should_ignore_dir(self, dirname: str) -> bool:
         """Return True when a directory should be skipped during recursive scans."""
-        return dirname in IGNORED_DIRECTORIES
+        return dirname in IGNORED_DIRECTORIES or "pycache" in dirname.lower()
 
     def is_supported_file(self, filename: str) -> bool:
         """Return True when a file is supported by the repository scanner."""

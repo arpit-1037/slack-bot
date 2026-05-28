@@ -142,6 +142,25 @@ All activity is logged to `bot.log`, including request lifecycle ids:
 tail -f bot.log
 ```
 
+## Repository Intelligence
+
+Project-debug tasks now use a deterministic repository intelligence layer instead of loading the whole repository. The flow is:
+
+```
+RepositoryScanner → RepositoryIndexer → DependencyMapper → ContextSelector
+```
+
+The scanner returns structured file metadata, the indexer extracts Python symbols with `ast`, the dependency mapper links imports to files, and the context selector chooses a small task-relevant context block for the prompt.
+
+Useful limits:
+
+```
+REPOSITORY_SCAN_MAX_FILE_BYTES=200000
+REPOSITORY_CONTEXT_MAX_FILES=6
+REPOSITORY_CONTEXT_MAX_CHARS=24000
+REPOSITORY_CONTEXT_MAX_FILE_CHARS=6000
+```
+
 ---
 
 ## ⚠️ Common Issues
