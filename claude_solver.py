@@ -10,6 +10,7 @@ import subprocess
 from ddgs import DDGS
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 from groq import Groq
 from openai import OpenAI
 
@@ -17,9 +18,34 @@ from database import get_conversation_history
 
 load_dotenv()
 
-
-MAX_GIT_OUTPUT_CHARS = 3500
+log = logging.getLogger(__name__)
 QUOTE_CHARS = "'\"“”‘’"
+CONTINUE_PROMPT = "Continue exactly where you stopped. Do not restart, summarize, or repeat earlier content."
+DEFAULT_AI_MAX_OUTPUT_TOKENS = 2048
+DEFAULT_OPENAI_MAX_TOKENS = 2048
+
+
+class AIServiceUnavailableError(RuntimeError):
+    """Raised when every configured AI provider fails for a task."""
+
+
+def int_env(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        value = int(os.getenv(name, default))
+    except ValueError:
+        value = default
+    return max(minimum, value)
+
+
+def ai_max_output_tokens(provider_env: str, default: int = DEFAULT_AI_MAX_OUTPUT_TOKENS) -> int:
+    if os.getenv(provider_env):
+        return int_env(provider_env, default)
+    return int_env("AI_MAX_OUTPUT_TOKENS", default)
+
+
+def git_repo_path() -> str:
+    path = os.getenv("GIT_REPO_PATH", ".").strip() or "."
+    return os.path.abspath(os.path.expanduser(path))
 
 
 # 1. Clean Slack @mention from task text
@@ -129,12 +155,17 @@ def classify_intent(task: str) -> str:
     return "general"
 
 
+def greeting_response() -> str:
+    return "Hey! Send me a task or question and I will help."
+
+
 # 4. Git utilities
 def run_git_command(args: list[str]) -> str:
     try:
         return subprocess.check_output(
             ["git"] + args,
             stderr=subprocess.DEVNULL,
+            cwd=git_repo_path(),
         ).decode().strip()
     except Exception:
         return ""
@@ -151,6 +182,7 @@ def run_git_action_command(args: list[str], timeout: int = 120) -> tuple[bool, s
             text=True,
             timeout=timeout,
             env=env,
+            cwd=git_repo_path(),
         )
     except subprocess.TimeoutExpired:
         return False, "Command timed out."
@@ -169,6 +201,7 @@ def has_git_changes(args: list[str]) -> bool:
             ["git"] + args,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            cwd=git_repo_path(),
         )
     except Exception:
         return False
@@ -185,16 +218,10 @@ def has_worktree_changes() -> bool:
     return bool(run_git_command(["ls-files", "--others", "--exclude-standard"]))
 
 
-def truncate_git_output(output: str) -> str:
-    if len(output) <= MAX_GIT_OUTPUT_CHARS:
-        return output
-    return output[:MAX_GIT_OUTPUT_CHARS] + "\n... output truncated ..."
-
-
 def format_git_result(args: list[str], ok: bool, output: str) -> str:
     status = "OK" if ok else "FAILED"
     command = shlex.join(["git"] + args)
-    return f"*{status}:* `{command}`\n```\n{truncate_git_output(output)}\n```"
+    return f"*{status}:* `{command}`\n```\n{output}\n```"
 
 
 def is_git_repo() -> bool:
@@ -220,7 +247,7 @@ def get_default_diff_range() -> tuple[str, str]:
 # 5. Return raw git diff directly without AI
 def get_raw_diff() -> str:
     if not is_git_repo():
-        return "Could not fetch git diff: current directory is not a git repository."
+        return f"Could not fetch git diff: configured git project is not a repository: {git_repo_path()}"
 
     try:
         commits = run_git_command(["log", "--oneline", "-3"]) or "No commits found."
@@ -314,7 +341,7 @@ def normalize_git_command(args: list[str]) -> list[str]:
 
 def run_git_commands(commands: list[list[str]]) -> str:
     if not is_git_repo():
-        return "Could not run git command: current directory is not a git repository."
+        return f"Could not run git command: configured git project is not a repository: {git_repo_path()}"
     if not commands:
         return "No git command found. Use an explicit command like `git status` or ask me to commit/push changes."
 
@@ -372,9 +399,10 @@ def run_git_action(task: str) -> str:
 # 6. Git context for AI
 def get_git_context() -> str:
     if not is_git_repo():
-        return "GIT CONTEXT: Current directory is not a git repository."
+        return f"GIT CONTEXT: Configured git project is not a repository: {git_repo_path()}"
 
     context = []
+    context.append(f"PROJECT PATH:\n{git_repo_path()}")
 
     branch = run_git_command(["branch", "--show-current"]) or "Unknown branch"
     context.append(f"CURRENT BRANCH:\n{branch}")
@@ -402,11 +430,11 @@ def get_git_context() -> str:
     if left:
         changed_files = run_git_command(["diff", "--name-only", left, right])
         diff_stat = run_git_command(["diff", "--stat", left, right])
-        diff = run_git_command(["diff", left, right])[:3000]
+        diff = run_git_command(["diff", left, right])
     else:
         changed_files = run_git_command(["show", "--name-only", "--pretty=format:", right])
         diff_stat = run_git_command(["show", "--stat", "--oneline", right])
-        diff = run_git_command(["show", right, "--format="])[:3000]
+        diff = run_git_command(["show", right, "--format="])
 
     context.append(f"FILES CHANGED IN MOST RECENT COMPARISON:\n{changed_files or 'None'}")
     context.append(f"DIFF SUMMARY:\n{diff_stat or 'Unavailable.'}")
@@ -416,7 +444,11 @@ def get_git_context() -> str:
 
 
 # 7. Read current codebase
-def read_codebase(project_path: str = ".") -> str:
+def read_codebase(project_path: str | None = None) -> str:
+    project_path = project_path or git_repo_path()
+    if not os.path.isdir(project_path):
+        return f"Project path not found: {project_path}"
+
     code_context = []
     for filename in sorted(os.listdir(project_path)):
         if filename.endswith(".py"):
@@ -524,14 +556,33 @@ def build_messages(
     return messages
 
 
-# 10. AI solvers
+def needs_continuation(finish_reason) -> bool:
+    reason = str(finish_reason or "").lower()
+    return reason in {"length", "max_tokens"} or "max_token" in reason
+
+
 def solve_with_groq(messages: list[dict]) -> str:
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=messages,
-    )
-    return response.choices[0].message.content
+    working_messages = list(messages)
+    parts = []
+
+    while True:
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=working_messages,
+            max_tokens=ai_max_output_tokens("GROQ_MAX_TOKENS"),
+        )
+        choice = response.choices[0]
+        content = choice.message.content or ""
+        parts.append(content)
+
+        if not content or not needs_continuation(getattr(choice, "finish_reason", None)):
+            break
+
+        working_messages.append({"role": "assistant", "content": content})
+        working_messages.append({"role": "user", "content": CONTINUE_PROMPT})
+
+    return "".join(parts)
 
 
 def solve_with_gemini(messages: list[dict]) -> str:
@@ -546,20 +597,52 @@ def solve_with_gemini(messages: list[dict]) -> str:
         convo_parts.append(f"{speaker}: {m['content']}")
     convo = "\n\n".join(convo_parts)
     prompt = f"{system}\n\n{convo}" if system else convo
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
-    )
-    return response.text
+    parts = []
+    current_prompt = prompt
+
+    while True:
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=current_prompt,
+            config=types.GenerateContentConfig(
+                max_output_tokens=ai_max_output_tokens("GEMINI_MAX_OUTPUT_TOKENS"),
+            ),
+        )
+        content = response.text or ""
+        parts.append(content)
+
+        candidate = response.candidates[0] if getattr(response, "candidates", None) else None
+        finish_reason = getattr(candidate, "finish_reason", None)
+        if not content or not needs_continuation(finish_reason):
+            break
+
+        current_prompt += f"\n\nAssistant: {content}\n\nUser: {CONTINUE_PROMPT}"
+
+    return "".join(parts)
 
 
 def solve_with_openai(messages: list[dict]) -> str:
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=messages,
-    )
-    return response.choices[0].message.content
+    working_messages = list(messages)
+    parts = []
+
+    while True:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=working_messages,
+            max_tokens=ai_max_output_tokens("OPENAI_MAX_TOKENS", DEFAULT_OPENAI_MAX_TOKENS),
+        )
+        choice = response.choices[0]
+        content = choice.message.content or ""
+        parts.append(content)
+
+        if not content or not needs_continuation(getattr(choice, "finish_reason", None)):
+            break
+
+        working_messages.append({"role": "assistant", "content": content})
+        working_messages.append({"role": "user", "content": CONTINUE_PROMPT})
+
+    return "".join(parts)
 
 
 # 11. Main solver
@@ -583,6 +666,9 @@ def solve_task(
     intent = classify_intent(clean)
     print(f"Detected intent: {intent}")
 
+    if intent == "greeting":
+        return greeting_response()
+
     if intent == "git_action":
         print("Git action detected - running git command.")
         return run_git_action(clean)
@@ -600,7 +686,7 @@ def solve_task(
         git_context = get_git_context()
 
         print("Reading codebase...")
-        code_context = read_codebase()
+        code_context = read_codebase(git_repo_path())
     elif intent == "web":
         print("Searching web...")
         search_context = search_web(clean)
@@ -609,6 +695,7 @@ def solve_task(
         clean, thread_ts, channel, slack_user,
         intent, git_context, code_context, search_context,
     )
+    provider_errors = []
 
     try:
         print("Trying Groq...")
@@ -616,6 +703,7 @@ def solve_task(
         print("Groq responded.")
         return result
     except Exception as error:
+        provider_errors.append(f"Groq: {error}")
         print(f"Groq failed: {error}")
 
     try:
@@ -624,6 +712,7 @@ def solve_task(
         print("Gemini responded.")
         return result
     except Exception as error:
+        provider_errors.append(f"Gemini: {error}")
         print(f"Gemini failed: {error}")
 
     try:
@@ -632,6 +721,10 @@ def solve_task(
         print("OpenAI responded.")
         return result
     except Exception as error:
+        provider_errors.append(f"OpenAI: {error}")
         print(f"OpenAI failed: {error}")
 
-    return "Sorry, all AI services are temporarily unavailable. Please try again in a few minutes."
+    log.error("All AI providers failed: %s", "; ".join(provider_errors))
+    raise AIServiceUnavailableError(
+        "All configured AI providers failed. Check bot.log for quota, rate-limit, API-key, or payload-size errors."
+    )

@@ -12,7 +12,7 @@ from slack_sdk.errors import SlackApiError
 from dotenv import load_dotenv
 
 from database import init_db, save_task, update_task
-from claude_solver import solve_task
+from claude_solver import AIServiceUnavailableError, solve_task
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
 load_dotenv()
@@ -28,6 +28,17 @@ slack = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
 
 # Track processed event IDs to prevent duplicate handling
 processed_events = set()
+
+
+def int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, default))
+    except ValueError:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+SLACK_MESSAGE_CHUNK_SIZE = int_env("SLACK_MESSAGE_CHUNK_SIZE", 39000, 1000, 39000)
 
 
 # ── Slack Signature Verification ───────────────────────────────────────────────
@@ -47,12 +58,39 @@ def verify_slack(req) -> bool:
 
 
 # ── Slack Helpers ──────────────────────────────────────────────────────────────
+def split_message(text: str, chunk_size: int = SLACK_MESSAGE_CHUNK_SIZE) -> list[str]:
+    """Split long Slack replies without dropping any content."""
+    if len(text) <= chunk_size:
+        return [text]
+
+    chunks = []
+    remaining = text
+    while len(remaining) > chunk_size:
+        split_at = remaining.rfind("\n", 0, chunk_size)
+        if split_at <= 0:
+            split_at = remaining.rfind(" ", 0, chunk_size)
+        if split_at <= 0:
+            split_at = chunk_size
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:]
+
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
 def post_message(channel: str, thread_ts: str, text: str):
     """Post a message into a Slack thread."""
-    try:
-        slack.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
-    except SlackApiError as e:
-        logging.error(f"Slack API error: {e.response['error']}")
+    chunks = split_message(text)
+    total = len(chunks)
+    for index, chunk in enumerate(chunks, start=1):
+        if total > 1:
+            chunk = f"{chunk}\n\n_Continued {index}/{total}_"
+        try:
+            slack.chat_postMessage(channel=channel, thread_ts=thread_ts, text=chunk)
+        except SlackApiError as e:
+            logging.error(f"Slack API error: {e.response['error']}")
+            break
 
 
 # ── Main Event Handler ─────────────────────────────────────────────────────────
@@ -93,6 +131,7 @@ def slack_events():
         task_id = save_task(slack_user=user, channel=channel, task_text=task_text, thread_ts=thread_ts)
 
         # 7. Send to Claude
+        message_heading = "✅ *Solution:*"
         try:
             solution = solve_task(
                 task_text,
@@ -102,16 +141,22 @@ def slack_events():
             )
             status   = "solved"
             logging.info(f"Task {task_id} solved successfully.")
-        except Exception as e:
-            solution = f"❌ Sorry, I ran into an error: {str(e)}"
+        except AIServiceUnavailableError as e:
+            solution = f"Sorry, all AI services are temporarily unavailable. {str(e)}"
             status   = "error"
+            message_heading = "⚠️ *AI unavailable:*"
+            logging.error(f"Task {task_id} failed because AI providers were unavailable: {e}")
+        except Exception as e:
+            solution = f"Sorry, I ran into an error: {str(e)}"
+            status   = "error"
+            message_heading = "❌ *Error:*"
             logging.error(f"Task {task_id} failed: {e}")
 
         # 8. Store solution in database
         update_task(task_id, solution, status)
 
         # 9. Post Claude's solution back to Slack
-        post_message(channel, thread_ts, f"✅ *Solution:*\n\n{solution}")
+        post_message(channel, thread_ts, f"{message_heading}\n\n{solution}")
 
     return jsonify({"status": "ok"})
 
