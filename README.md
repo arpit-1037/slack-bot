@@ -3,12 +3,12 @@ python3 app.py
 ngrok http 3000
 # 🤖 Slack Claude Bot
 
-Automatically solves tasks when you're @mentioned in Slack, powered by Claude AI.
+Automatically solves tasks when you're @mentioned in Slack, powered by a Groq → Gemini → OpenAI fallback chain.
 
 ## How It Works
 
 ```
-@mention in Slack → Flask Server → Claude API → Reply in thread + Save to DB
+@mention in Slack → Flask Server → Slack handler → Planner → Executor/tools → LLM provider fallback → Reply in thread + Save to DB
 ```
 
 ---
@@ -17,13 +17,23 @@ Automatically solves tasks when you're @mentioned in Slack, powered by Claude AI
 
 ```
 slack-claude-bot/
-├── app.py            ← Main server (Flask) — receives Slack events
-├── claude_solver.py  ← Sends task to Claude, returns solution
-├── database.py       ← Saves tasks & solutions to SQLite
-├── requirements.txt  ← Python dependencies
-├── .env.example      ← Copy this to .env and fill in your keys
-├── .gitignore        ← Keeps secrets and DB out of git
-└── README.md         ← You are here
+├── app.py                         ← Lightweight Flask entrypoint
+├── claude_solver.py               ← Backward-compatible solver facade
+├── database.py                    ← Saves tasks & solutions to SQLite
+├── src/
+│   ├── slack/                     ← Slack request handling and responses
+│   ├── router/                    ← Intent classification
+│   ├── planner/                   ← Deterministic task planning
+│   ├── executor/                  ← Tool execution and orchestration
+│   ├── tools/                     ← Git, repository, web, terminal, conversation tools
+│   ├── repository/                ← Recursive repository scanner
+│   ├── llm/                       ← Provider fallback and continuation handling
+│   ├── prompts/                   ← System prompt and prompt builder
+│   ├── memory/                    ← Conversation history access
+│   └── utils/                     ← Small shared helpers
+├── requirements.txt
+├── .env.example
+└── README.md
 ```
 
 ---
@@ -45,9 +55,12 @@ cp .env.example .env
 Open `.env` and fill in:
 
 ```
-SLACK_BOT_TOKEN=xoxb-...       ← From Slack App → OAuth & Permissions
+SLACK_BOT_TOKEN=xoxb-...        ← From Slack App → OAuth & Permissions
 SLACK_SIGNING_SECRET=...        ← From Slack App → Basic Information
-ANTHROPIC_API_KEY=sk-ant-...   ← From console.anthropic.com
+GROQ_API_KEY=gsk-...
+GEMINI_API_KEY=...
+OPENAI_API_KEY=sk-...
+GIT_REPO_PATH=/absolute/path/to/project
 ```
 
 ### 3. Create Your Slack App
@@ -103,7 +116,7 @@ Mention the bot with any task:
 
 The bot will:
 1. Acknowledge immediately: `⏳ On it!`
-2. Send the task to Claude
+2. Plan the task and execute only the needed tools
 3. Reply in the thread with the solution
 4. Save everything to `tasks.db`
 
@@ -123,7 +136,7 @@ Or open `tasks.db` in **TablePlus** or **DBeaver** to browse visually.
 
 ## 📋 Logs
 
-All activity is logged to `bot.log`:
+All activity is logged to `bot.log`, including request lifecycle ids:
 
 ```bash
 tail -f bot.log
