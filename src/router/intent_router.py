@@ -22,8 +22,8 @@ class IntentRouter:
         if is_git_action_query(task_lower):
             return "git_action"
 
-        if is_git_query(task_lower):
-            return "git"
+        if self._is_project_debug_query(task_lower):
+            return "project_debug"
 
         generic_code_signals = [
             "write code", "code in", "example in", "program in",
@@ -34,13 +34,8 @@ class IntentRouter:
         if any(signal in task_lower for signal in generic_code_signals):
             return "generic_code"
 
-        project_debug_signals = [
-            "bug", "error", "issue", "not working", "failing", "broken",
-            "fix this", "debug", "trace", "exception", "why is this failing",
-            "check this code", "review this file",
-        ]
-        if any(signal in task_lower for signal in project_debug_signals):
-            return "project_debug"
+        if is_git_query(task_lower):
+            return "git"
 
         web_signals = [
             "latest", "current", "today", "news", "install", "documentation",
@@ -50,6 +45,30 @@ class IntentRouter:
             return "web"
 
         return "general"
+
+    def _is_project_debug_query(self, task_lower: str) -> bool:
+        """Return True for bug/debug questions that need repository-aware analysis."""
+        project_debug_signals = [
+            "bug", "error", "issue", "not working", "failing", "failed",
+            "broken", "fix this", "debug", "trace", "traceback", "stack trace",
+            "exception", "crash", "crashing", "breaking", "circular import",
+            "why is", "why does", "why this", "check this code", "review this file",
+        ]
+        if any(signal in task_lower for signal in project_debug_signals):
+            return True
+
+        code_area_signals = [
+            "auth", "authentication", "jwt", "login", "middleware",
+            "controller", "redis", "import", "service", "repository",
+            "route", "handler", "connection", "flow",
+        ]
+        changed_flow_signals = [
+            "what changed", "changed", "recent change", "recently changed",
+        ]
+        return (
+            any(signal in task_lower for signal in changed_flow_signals)
+            and any(signal in task_lower for signal in code_area_signals)
+        )
 
 
 def classify_intent(task: str) -> str:

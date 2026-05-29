@@ -142,6 +142,50 @@ All activity is logged to `bot.log`, including request lifecycle ids:
 tail -f bot.log
 ```
 
+## Repository-Aware Debugging
+
+Debugging tasks now use a focused repository workflow instead of sending a broad code dump:
+
+```
+bug report
+  ↓
+StacktraceParser
+  ↓
+BugContextBuilder
+  ↓
+RepositoryIndexer + DependencyMapper + ContextSelector
+  ↓
+DebugPromptBuilder
+  ↓
+ProviderRouter
+```
+
+Useful local examples:
+
+```python
+from src.debugging.stacktrace_parser import StacktraceParser
+
+trace = StacktraceParser().parse(user_text)
+print(trace.as_dict())
+```
+
+```python
+from src.debugging.bug_context_builder import BugContextBuilder
+from src.debugging.stacktrace_parser import StacktraceParser
+
+trace = StacktraceParser().parse("Why JWT login failing?")
+context = BugContextBuilder().build(".", "Why JWT login failing?", trace)
+print(context.format_context())
+```
+
+Debug context limits:
+
+```
+DEBUG_CONTEXT_MAX_FILES=5
+DEBUG_SNIPPET_RADIUS=14
+DEBUG_CONTEXT_MAX_FILE_CHARS=5000
+```
+
 ---
 
 ## ⚠️ Common Issues

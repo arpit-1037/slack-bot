@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from src.debugging.repository_debugger import RepositoryDebugger
 from src.llm.provider_router import ProviderRouter
 from src.planner.task_planner import TaskPlan
 from src.prompts.prompt_builder import PromptBuilder
@@ -23,12 +24,16 @@ class TaskExecutor:
         web_search_tool: WebSearchTool | None = None,
         prompt_builder: PromptBuilder | None = None,
         provider_router: ProviderRouter | None = None,
+        repository_debugger: RepositoryDebugger | None = None,
     ) -> None:
         self.git_tool = git_tool or GitTool()
         self.repository_tool = repository_tool or RepositoryTool()
         self.web_search_tool = web_search_tool or WebSearchTool()
         self.prompt_builder = prompt_builder or PromptBuilder()
         self.provider_router = provider_router or ProviderRouter()
+        self.repository_debugger = repository_debugger or RepositoryDebugger(
+            provider_router=self.provider_router
+        )
 
     def execute(
         self,
@@ -40,7 +45,7 @@ class TaskExecutor:
     ) -> str:
         """Execute the planned actions and return the Slack response text."""
         log.info(
-            "request_id=%s executing plan intent=%s git_action=%s raw_git=%s git_context=%s repo_context=%s web=%s",
+            "request_id=%s executing plan intent=%s git_action=%s raw_git=%s git_context=%s repo_context=%s web=%s repo_debug=%s",
             request_id,
             plan.intent,
             plan.run_git_action,
@@ -48,6 +53,7 @@ class TaskExecutor:
             plan.needs_git_context,
             plan.needs_repository_context,
             plan.needs_web_search,
+            plan.use_repository_debugger,
         )
 
         if plan.direct_response is not None:
@@ -58,6 +64,16 @@ class TaskExecutor:
 
         if plan.return_raw_git_diff:
             return self.git_tool.get_raw_diff()
+
+        if plan.use_repository_debugger:
+            return self.repository_debugger.debug(
+                project_path=self.git_tool.repo_path,
+                task=plan.clean_task,
+                thread_ts=thread_ts,
+                channel=channel,
+                slack_user=slack_user,
+                request_id=request_id,
+            )
 
         git_context = "Not needed for this task."
         code_context = "Not needed for this task."

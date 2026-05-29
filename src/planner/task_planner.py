@@ -24,6 +24,7 @@ class TaskPlan:
     needs_git_context: bool = False
     needs_repository_context: bool = False
     needs_web_search: bool = False
+    use_repository_debugger: bool = False
 
 
 class TaskPlanner:
@@ -85,7 +86,8 @@ class TaskPlanner:
             original_task=task_text,
             clean_task=clean,
             intent=intent,
-            needs_git_context=intent == "project_debug",
-            needs_repository_context=intent == "project_debug",
+            needs_git_context=False,
+            needs_repository_context=False,
             needs_web_search=intent == "web",
+            use_repository_debugger=intent == "project_debug",
         )
