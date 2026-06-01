@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 from src.repository.repository_indexer import FileIndexEntry
+from src.repository.repository_state import RepositoryState
 from src.utils.helpers import get_logger
 
 log = get_logger(__name__)
@@ -16,9 +17,15 @@ class DependencyMapper:
     def __init__(self) -> None:
         self.dependencies: dict[str, set[str]] = {}
         self.dependents: dict[str, set[str]] = {}
+        self.repository_state: RepositoryState | None = None
 
-    def refresh(self, index: dict[str, FileIndexEntry]) -> None:
+    def refresh(
+        self,
+        index: dict[str, FileIndexEntry],
+        repository_state: RepositoryState | None = None,
+    ) -> None:
         """Rebuild dependency maps from an index."""
+        self.repository_state = repository_state
         module_to_path = self._module_to_path(index)
         path_lookup = self._path_lookup(index)
         self.dependencies = {path: set() for path in index}
@@ -35,7 +42,12 @@ class DependencyMapper:
                         self.dependencies[path].add(target_path)
                         self.dependents[target_path].add(path)
 
-        log.info("Mapped repository dependencies files=%d", len(index))
+        log.info(
+            "Mapped repository dependencies files=%d branch=%s head=%s",
+            len(index),
+            repository_state.branch if repository_state else "unknown",
+            repository_state.head_commit[:12] if repository_state and repository_state.head_commit else "unknown",
+        )
 
     def get_dependencies(self, file_path: str) -> list[str]:
         """Return files imported by file_path."""

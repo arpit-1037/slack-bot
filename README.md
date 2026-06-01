@@ -187,6 +187,47 @@ DEBUG_SNIPPET_RADIUS=14
 DEBUG_CONTEXT_MAX_FILE_CHARS=5000
 ```
 
+## Repository State Management
+
+Repository-aware modules share a persistent state layer so they can reuse fresh repository metadata before falling back to heavier scans:
+
+```
+request
+  ↓
+RepositoryStateRefresher
+  ↓
+RepositoryStateCache
+  ↓
+RepositoryIndexer + DependencyMapper + ContextSelector
+```
+
+The state tracks branch, HEAD commit, indexed timestamps, supported file counts, Python file counts, changed files, staged files, untracked files, and health signals.
+
+Useful local examples:
+
+```python
+from src.repository.state_refresher import RepositoryStateRefresher
+
+state = RepositoryStateRefresher().refresh_state(".")
+print(state.get_repository_summary())
+```
+
+```python
+from src.repository.repository_indexer import RepositoryIndexer
+
+indexer = RepositoryIndexer()
+indexer.ensure_index(".")
+print(indexer.repository_state.as_summary_dict())
+```
+
+Cache controls:
+
+```
+REPOSITORY_STATE_CACHE_TTL_SECONDS=300
+REPOSITORY_STATE_CACHE_PATH=/absolute/path/to/state.json
+REPOSITORY_STATE_CACHE_DIR=/absolute/cache/dir
+```
+
 ## Safe Repository Modification
 
 Modification tasks use an explicit guarded workflow instead of naive file rewriting:

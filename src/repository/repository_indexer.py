@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from typing import TypedDict
 
 from src.repository.repository_scanner import RepositoryScanner, ScannedFile
+from src.repository.repository_state import RepositoryState
+from src.repository.state_refresher import RepositoryStateRefresher
 from src.repository.symbol_extractor import ImportInfo, SymbolExtractor, SymbolMap, empty_symbol_map
 from src.utils.helpers import get_logger
 
@@ -29,14 +32,18 @@ class RepositoryIndexer:
         self,
         scanner: RepositoryScanner | None = None,
         symbol_extractor: SymbolExtractor | None = None,
+        state_refresher: RepositoryStateRefresher | None = None,
     ) -> None:
         self.scanner = scanner or RepositoryScanner()
         self.symbol_extractor = symbol_extractor or SymbolExtractor()
+        self.state_refresher = state_refresher or RepositoryStateRefresher(scanner=self.scanner)
         self.project_path: str | None = None
         self.files: dict[str, FileIndexEntry] = {}
+        self.repository_state: RepositoryState | None = None
 
     def refresh(self, project_path: str) -> dict[str, FileIndexEntry]:
         """Rebuild the in-memory index for a repository path."""
+        project_path = os.path.abspath(os.path.expanduser(project_path))
         scanned_files = self.scanner.scan(project_path)
         self.project_path = project_path
         self.files = {}
@@ -52,6 +59,12 @@ class RepositoryIndexer:
                 "symbols": self._extract_symbols(file_info),
             }
 
+        self.repository_state = self.state_refresher.refresh_state(
+            project_path=project_path,
+            force=True,
+            scanned_files=scanned_files,
+            index=self.files,
+        )
         log.info("Indexed repository path=%s files=%d", project_path, len(self.files))
         return self.files
 
@@ -61,9 +74,28 @@ class RepositoryIndexer:
 
     def ensure_index(self, project_path: str) -> dict[str, FileIndexEntry]:
         """Return current index, refreshing when the path changes or index is empty."""
+        project_path = os.path.abspath(os.path.expanduser(project_path))
         if self.project_path != project_path or not self.files:
             return self.refresh(project_path)
+        if self.state_refresher.needs_refresh(self.repository_state, project_path):
+            return self.refresh(project_path)
         return self.files
+
+    def get_repository_state(self, project_path: str) -> RepositoryState:
+        """Return repository state associated with the current in-memory index."""
+        project_path = os.path.abspath(os.path.expanduser(project_path))
+        if (
+            self.repository_state is not None
+            and self.repository_state.repo_path == project_path
+            and not self.state_refresher.needs_refresh(self.repository_state, project_path)
+        ):
+            return self.repository_state
+        if self.project_path == project_path and self.files:
+            self.ensure_index(project_path)
+            if self.repository_state is not None:
+                return self.repository_state
+        self.repository_state = self.state_refresher.refresh_state(project_path=project_path)
+        return self.repository_state
 
     def find_file(self, query: str) -> list[FileIndexEntry]:
         """Find files whose paths contain the query."""

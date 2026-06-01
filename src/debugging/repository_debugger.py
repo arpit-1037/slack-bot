@@ -44,6 +44,15 @@ class RepositoryDebugger:
             stacktrace=stacktrace,
             request_id=request_id,
         )
+        repository_state = bug_context.repository_state
+        if repository_state is not None:
+            log.info(
+                "request_id=%s repository debugger state branch=%s head=%s files=%d",
+                request_id,
+                repository_state.branch or "unknown",
+                repository_state.head_commit[:12] if repository_state.head_commit else "unavailable",
+                repository_state.file_count,
+            )
         messages = self.debug_prompt_builder.build_messages(
             task=task,
             bug_context=bug_context,

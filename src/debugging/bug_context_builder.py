@@ -10,6 +10,7 @@ from src.debugging.stacktrace_parser import ParsedStackTrace
 from src.repository.context_selector import ContextSelector
 from src.repository.dependency_mapper import DependencyMapper
 from src.repository.repository_indexer import FileIndexEntry, RepositoryIndexer
+from src.repository.repository_state import RepositoryState
 from src.utils.helpers import get_logger, int_env
 
 log = get_logger(__name__)
@@ -45,13 +46,16 @@ class BugContext:
     files: list[DebugFileContext]
     dependency_edges: list[str]
     stacktrace: ParsedStackTrace
+    repository_state: RepositoryState | None = None
 
     def format_context(self) -> str:
         """Format selected debugging context for the debug prompt."""
-        if not self.files:
-            return "No repository files matched the bug report."
-
         parts = ["FOCUSED DEBUGGING CONTEXT"]
+        if self.repository_state is not None:
+            parts.append(self._format_repository_state(self.repository_state))
+        if not self.files:
+            parts.append("No repository files matched the bug report.")
+            return "\n\n".join(parts)
         if self.dependency_edges:
             parts.append("Dependency edges:\n" + "\n".join(f"- {edge}" for edge in self.dependency_edges))
 
@@ -76,6 +80,19 @@ class BugContext:
             lines.append(f"--- lines {snippet.line_start}-{snippet.line_end} ---")
             lines.append(snippet.content)
         return "\n".join(lines)
+
+    def _format_repository_state(self, repository_state: RepositoryState) -> str:
+        """Format repository state signals for debug prompts."""
+        return (
+            "Repository state:\n"
+            f"branch: {repository_state.branch or 'unknown'}\n"
+            f"head: {repository_state.head_commit[:12] if repository_state.head_commit else 'unavailable'}\n"
+            f"indexed_at: {repository_state.indexed_at or 'never'}\n"
+            f"files_indexed: {repository_state.file_count}\n"
+            f"changed_files: {', '.join(repository_state.changed_files) or 'none'}\n"
+            f"staged_files: {', '.join(repository_state.staged_files) or 'none'}\n"
+            f"untracked_files: {', '.join(repository_state.untracked_files) or 'none'}"
+        )
 
 
 class BugContextBuilder:
@@ -110,7 +127,8 @@ class BugContextBuilder:
     ) -> BugContext:
         """Build a focused bug context from stacktrace, explicit refs, and index signals."""
         index = self.indexer.ensure_index(project_path)
-        self.dependency_mapper.refresh(index)
+        repository_state = self.indexer.repository_state or self.indexer.get_repository_state(project_path)
+        self.dependency_mapper.refresh(index, repository_state=repository_state)
         selection = self.context_selector.select_context(project_path, bug_description, request_id=request_id)
         terms = self.context_selector.query_terms(bug_description)
 
@@ -130,7 +148,12 @@ class BugContextBuilder:
             len(edges),
             len(stacktrace.frames),
         )
-        return BugContext(files=files, dependency_edges=edges, stacktrace=stacktrace)
+        return BugContext(
+            files=files,
+            dependency_edges=edges,
+            stacktrace=stacktrace,
+            repository_state=repository_state,
+        )
 
     def _candidate_paths(
         self,

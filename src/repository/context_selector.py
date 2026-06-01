@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from src.repository.dependency_mapper import DependencyMapper
 from src.repository.repository_indexer import FileIndexEntry, RepositoryIndexer
+from src.repository.repository_state import RepositoryState
 from src.utils.helpers import get_logger, int_env
 
 log = get_logger(__name__)
@@ -56,6 +58,7 @@ class ContextSelection:
     task: str
     selected_files: list[SelectedFile]
     context: str
+    repository_summary: dict[str, Any] = field(default_factory=dict)
 
 
 class ContextSelector:
@@ -83,7 +86,8 @@ class ContextSelector:
     ) -> ContextSelection:
         """Build a compact repository context string for a task."""
         index = self.indexer.ensure_index(project_path)
-        self.dependency_mapper.refresh(index)
+        repository_state = self.indexer.repository_state or self.indexer.get_repository_state(project_path)
+        self.dependency_mapper.refresh(index, repository_state=repository_state)
         terms = self.query_terms(task)
 
         scored = self._score_files(index, terms)
@@ -92,16 +96,22 @@ class ContextSelector:
             self._selected_file(path, score, reasons, index[path], terms)
             for path, score, reasons in selected_paths
         ]
-        context = self._format_context(selected_files, index)
+        context = self._format_context(selected_files, index, repository_state)
 
         log.info(
-            "request_id=%s selected repository context files=%d chars=%d terms=%s",
+            "request_id=%s selected repository context files=%d chars=%d branch=%s terms=%s",
             request_id,
             len(selected_files),
             len(context),
+            repository_state.branch or "unknown",
             ",".join(sorted(terms)),
         )
-        return ContextSelection(task=task, selected_files=selected_files, context=context)
+        return ContextSelection(
+            task=task,
+            selected_files=selected_files,
+            context=context,
+            repository_summary=repository_state.as_summary_dict(),
+        )
 
     def query_terms(self, task: str) -> set[str]:
         """Tokenize and expand a task into deterministic repository search terms."""
@@ -228,12 +238,19 @@ class ContextSelector:
         self,
         selected_files: list[SelectedFile],
         index: dict[str, FileIndexEntry],
+        repository_state: RepositoryState,
     ) -> str:
         """Format selected context for a generic prompt."""
         if not selected_files:
-            return "No relevant repository context found."
+            return "\n\n".join(
+                [
+                    "REPOSITORY CONTEXT SELECTION",
+                    self._format_repository_state(repository_state),
+                    "No relevant repository context found.",
+                ]
+            )
 
-        parts = ["REPOSITORY CONTEXT SELECTION"]
+        parts = ["REPOSITORY CONTEXT SELECTION", self._format_repository_state(repository_state)]
         for selected in selected_files:
             entry = index[selected.path]
             chunk = f"{self._file_summary(selected, entry)}\n{self._file_excerpt(entry)}".strip()
@@ -261,6 +278,20 @@ class ContextSelector:
             f"classes: {classes}\n"
             f"functions: {functions}\n"
             f"imports: {imports}"
+        )
+
+    def _format_repository_state(self, repository_state: RepositoryState) -> str:
+        """Format repository state metadata for prompt context."""
+        return (
+            "Repository State:\n"
+            f"path: {repository_state.repo_path}\n"
+            f"branch: {repository_state.branch or 'unknown'}\n"
+            f"head: {repository_state.head_commit[:12] if repository_state.head_commit else 'unavailable'}\n"
+            f"indexed_at: {repository_state.indexed_at or 'never'}\n"
+            f"files_indexed: {repository_state.file_count}\n"
+            f"changed_files: {', '.join(repository_state.changed_files) or 'none'}\n"
+            f"staged_files: {', '.join(repository_state.staged_files) or 'none'}\n"
+            f"untracked_files: {', '.join(repository_state.untracked_files) or 'none'}"
         )
 
     def _file_excerpt(self, entry: FileIndexEntry) -> str:
