@@ -25,6 +25,7 @@ class TaskPlan:
     needs_repository_context: bool = False
     needs_web_search: bool = False
     use_repository_debugger: bool = False
+    use_repository_modifier: bool = False
 
 
 class TaskPlanner:
@@ -90,4 +91,5 @@ class TaskPlanner:
             needs_repository_context=False,
             needs_web_search=intent == "web",
             use_repository_debugger=intent == "project_debug",
+            use_repository_modifier=intent == "project_modify",
         )

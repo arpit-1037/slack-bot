@@ -22,6 +22,9 @@ class IntentRouter:
         if is_git_action_query(task_lower):
             return "git_action"
 
+        if self._is_project_modification_query(task_lower):
+            return "project_modify"
+
         if self._is_project_debug_query(task_lower):
             return "project_debug"
 
@@ -69,6 +72,31 @@ class IntentRouter:
             any(signal in task_lower for signal in changed_flow_signals)
             and any(signal in task_lower for signal in code_area_signals)
         )
+
+    def _is_project_modification_query(self, task_lower: str) -> bool:
+        """Return True when the user is asking for repository code changes."""
+        explanation_only = [
+            "how do i", "how to", "why is", "why does", "explain",
+            "what is", "what does", "review only", "analyze only",
+        ]
+        if any(signal in task_lower for signal in explanation_only):
+            return False
+
+        strong_action_signals = [
+            "fix", "patch", "modify", "edit", "update", "change", "implement",
+            "refactor", "rename", "remove", "delete", "add support", "add a",
+            "add an", "create file", "create module", "write tests", "add tests",
+        ]
+        if not any(signal in task_lower for signal in strong_action_signals):
+            return False
+
+        repository_signals = [
+            "repo", "repository", "project", "codebase", "file", "module",
+            "class", "function", "bug", "error", "failing", "failed", "broken",
+            "handler", "controller", "service", "route", "import", "test",
+            ".py", ".js", ".ts", ".php", "src/",
+        ]
+        return any(signal in task_lower for signal in repository_signals)
 
 
 def classify_intent(task: str) -> str:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from src.debugging.repository_debugger import RepositoryDebugger
 from src.llm.provider_router import ProviderRouter
+from src.modification.patch_generator import PatchGenerator
+from src.modification.repository_modifier import RepositoryModifier
 from src.planner.task_planner import TaskPlan
 from src.prompts.prompt_builder import PromptBuilder
 from src.tools.git_tool import GitTool
@@ -25,6 +27,7 @@ class TaskExecutor:
         prompt_builder: PromptBuilder | None = None,
         provider_router: ProviderRouter | None = None,
         repository_debugger: RepositoryDebugger | None = None,
+        repository_modifier: RepositoryModifier | None = None,
     ) -> None:
         self.git_tool = git_tool or GitTool()
         self.repository_tool = repository_tool or RepositoryTool()
@@ -33,6 +36,9 @@ class TaskExecutor:
         self.provider_router = provider_router or ProviderRouter()
         self.repository_debugger = repository_debugger or RepositoryDebugger(
             provider_router=self.provider_router
+        )
+        self.repository_modifier = repository_modifier or RepositoryModifier(
+            patch_generator=PatchGenerator(provider_router=self.provider_router)
         )
 
     def execute(
@@ -45,7 +51,7 @@ class TaskExecutor:
     ) -> str:
         """Execute the planned actions and return the Slack response text."""
         log.info(
-            "request_id=%s executing plan intent=%s git_action=%s raw_git=%s git_context=%s repo_context=%s web=%s repo_debug=%s",
+            "request_id=%s executing plan intent=%s git_action=%s raw_git=%s git_context=%s repo_context=%s web=%s repo_debug=%s repo_modify=%s",
             request_id,
             plan.intent,
             plan.run_git_action,
@@ -54,6 +60,7 @@ class TaskExecutor:
             plan.needs_repository_context,
             plan.needs_web_search,
             plan.use_repository_debugger,
+            plan.use_repository_modifier,
         )
 
         if plan.direct_response is not None:
@@ -67,6 +74,16 @@ class TaskExecutor:
 
         if plan.use_repository_debugger:
             return self.repository_debugger.debug(
+                project_path=self.git_tool.repo_path,
+                task=plan.clean_task,
+                thread_ts=thread_ts,
+                channel=channel,
+                slack_user=slack_user,
+                request_id=request_id,
+            )
+
+        if plan.use_repository_modifier:
+            return self.repository_modifier.modify(
                 project_path=self.git_tool.repo_path,
                 task=plan.clean_task,
                 thread_ts=thread_ts,

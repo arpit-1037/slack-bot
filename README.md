@@ -27,6 +27,7 @@ slack-claude-bot/
 │   ├── executor/                  ← Tool execution and orchestration
 │   ├── tools/                     ← Git, repository, web, terminal, conversation tools
 │   ├── repository/                ← Recursive repository scanner
+│   ├── modification/              ← Safe targeted repository modification
 │   ├── llm/                       ← Provider fallback and continuation handling
 │   ├── prompts/                   ← System prompt and prompt builder
 │   ├── memory/                    ← Conversation history access
@@ -184,6 +185,53 @@ Debug context limits:
 DEBUG_CONTEXT_MAX_FILES=5
 DEBUG_SNIPPET_RADIUS=14
 DEBUG_CONTEXT_MAX_FILE_CHARS=5000
+```
+
+## Safe Repository Modification
+
+Modification tasks use an explicit guarded workflow instead of naive file rewriting:
+
+```
+modification request
+  ↓
+RepositoryIndexer + ContextSelector
+  ↓
+PatchGenerator structured operations
+  ↓
+DiffManager preview
+  ↓
+ChangeValidator syntax/import checks
+  ↓
+SafeFileEditor atomic apply + backup
+```
+
+Useful local examples:
+
+```python
+from src.modification.patch_generator import PatchGenerator, PatchOperation
+
+original = {"example.py": "def greet():\n    return 'hi'\n"}
+operation = PatchOperation(
+    op="replace",
+    path="example.py",
+    target_type="function",
+    target="greet",
+    content="def greet():\n    return 'hello'\n",
+)
+print(PatchGenerator().apply_operations(original, [operation])["example.py"])
+```
+
+```python
+from src.modification.change_validator import ChangeValidator
+
+result = ChangeValidator().validate(".", {"example.py": "def ok():\n    return True\n"})
+print(result.format_report())
+```
+
+Optional validation:
+
+```
+MODIFICATION_RUN_PYTEST=true
 ```
 
 ---

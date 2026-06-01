@@ -60,6 +60,18 @@ def is_git_action_query(task: str) -> bool:
     if extract_git_commands(task):
         return True
 
+    code_add_patterns = [
+        r"\badd (?:support|tests?|a |an |feature|module|file|function|class)\b",
+        r"\bcreate (?:tests?|a |an |module|file|function|class)\b",
+        r"\bimplement\b",
+    ]
+    if (
+        any(re.search(pattern, task_lower) for pattern in code_add_patterns)
+        and "git" not in task_lower
+        and "stage" not in task_lower
+    ):
+        return False
+
     action_patterns = [
         r"\bstage\b", r"\badd\b", r"\bcommit\b", r"\bpush\b",
         r"\bpull\b", r"\bfetch\b", r"\bstash\b", r"\bmerge\b",
