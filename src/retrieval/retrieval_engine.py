@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+from src.embeddings.index_builder import EmbeddingIndexBuilder
+from src.embeddings.embedding_models import SearchResult
 from src.repository.dependency_mapper import DependencyMapper
 from src.repository.repository_indexer import FileIndexEntry, RepositoryIndexer
 from src.repository.repository_state import RepositoryState
@@ -11,7 +13,7 @@ from src.retrieval.context_assembler import ContextAssembler
 from src.retrieval.file_ranker import FileRanker, query_terms
 from src.retrieval.retrieval_models import RankedFile, RankedSymbol, RetrievalResult
 from src.retrieval.symbol_ranker import SymbolRanker
-from src.utils.helpers import get_logger, int_env
+from src.utils.helpers import bool_env, get_logger, int_env
 
 log = get_logger(__name__)
 
@@ -29,6 +31,8 @@ class RepositoryRetrievalEngine:
         max_files: int | None = None,
         max_symbols: int | None = None,
         dependency_limit: int | None = None,
+        embedding_index_builder: EmbeddingIndexBuilder | None = None,
+        enable_semantic_search: bool | None = None,
     ) -> None:
         self.indexer = indexer or RepositoryIndexer()
         self.dependency_mapper = dependency_mapper or DependencyMapper()
@@ -38,6 +42,12 @@ class RepositoryRetrievalEngine:
         self.max_files = max_files or int_env("RETRIEVAL_MAX_FILES", 6, 1)
         self.max_symbols = max_symbols or int_env("RETRIEVAL_MAX_SYMBOLS", 12, 1)
         self.dependency_limit = dependency_limit or int_env("RETRIEVAL_DEPENDENCY_LIMIT", 2, 0)
+        self.embedding_index_builder = embedding_index_builder or EmbeddingIndexBuilder(indexer=self.indexer)
+        self.enable_semantic_search = (
+            enable_semantic_search
+            if enable_semantic_search is not None
+            else bool_env("RETRIEVAL_ENABLE_SEMANTIC", False)
+        )
 
     def retrieve_context(
         self,
@@ -140,6 +150,14 @@ class RepositoryRetrievalEngine:
             dependency_mapper=self.dependency_mapper,
             repository_state=repository_state,
         )
+        if self.enable_semantic_search:
+            ranked = self._merge_semantic_results(
+                ranked,
+                query=query,
+                index=index,
+                repository_state=repository_state,
+                limit=limit,
+            )
         if not ranked:
             ranked = self._fallback_files(index, repository_state)
 
@@ -246,3 +264,65 @@ class RepositoryRetrievalEngine:
                 )
             )
         return ranked
+
+    def _merge_semantic_results(
+        self,
+        ranked: list[RankedFile],
+        query: str,
+        index: dict[str, FileIndexEntry],
+        repository_state: RepositoryState,
+        limit: int,
+    ) -> list[RankedFile]:
+        """Merge vector search results as an additional ranking signal."""
+        project_path = self.indexer.project_path
+        if not project_path:
+            return ranked
+        try:
+            response = self.embedding_index_builder.semantic_search(
+                project_path=project_path,
+                query=query,
+                limit=max(limit * 2, 4),
+            )
+        except Exception as error:
+            log.warning("Semantic retrieval skipped: %s", error)
+            return ranked
+
+        by_path = {file.path: file for file in ranked}
+        semantic_by_path: dict[str, list[SearchResult]] = {}
+        for result in response.results:
+            if result.chunk.file_path in index:
+                semantic_by_path.setdefault(result.chunk.file_path, []).append(result)
+
+        for path, results in semantic_by_path.items():
+            semantic_score = max(int(result.similarity_score * 30) for result in results)
+            best = max(results, key=lambda item: item.similarity_score)
+            reason = (
+                f"semantic:{best.similarity_score:.2f}"
+                + (f":{best.chunk.symbol_name}" if best.chunk.symbol_name else "")
+            )
+            entry = index[path]
+            semantic_file = RankedFile(
+                path=path,
+                score=semantic_score,
+                reasons=[reason],
+                source_metadata={
+                    "extension": entry.get("extension", ""),
+                    "size": entry.get("size", 0),
+                    "truncated": bool(entry.get("truncated", False)),
+                    "semantic": {
+                        "score": best.similarity_score,
+                        "chunk_id": best.chunk.chunk_id,
+                        "symbol_name": best.chunk.symbol_name,
+                        "backend": response.metadata.get("backend"),
+                        "provider": response.metadata.get("provider"),
+                    },
+                },
+                dependencies=self.dependency_mapper.get_dependencies(path),
+                dependents=self.dependency_mapper.get_dependents(path),
+            )
+            current = by_path.get(path)
+            by_path[path] = self._merge_file(current, semantic_file) if current else semantic_file
+
+        merged = list(by_path.values())
+        merged.sort(key=lambda file: (-file.score, file.path))
+        return merged

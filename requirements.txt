@@ -6,3 +6,4 @@ groq==1.1.1
 google-genai==1.66.0
 openai==2.26.0
 ddgs==9.11.3
+Pillow>=9.1.0

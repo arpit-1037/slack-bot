@@ -28,6 +28,7 @@ slack-claude-bot/
 │   ├── tools/                     ← Git, repository, web, terminal, conversation tools
 │   ├── repository/                ← Recursive repository scanner
 │   ├── retrieval/                 ← Deterministic file/symbol/snippet retrieval
+│   ├── embeddings/                ← Semantic chunks, embeddings, vector search
 │   ├── modification/              ← Safe targeted repository modification
 │   ├── validation/                ← Syntax, import, test, lint verification
 │   ├── llm/                       ← Provider fallback and continuation handling
@@ -47,6 +48,18 @@ slack-claude-bot/
 
 ```bash
 pip install -r requirements.txt
+```
+
+Optional semantic retrieval backends:
+
+```bash
+pip install sentence-transformers chromadb "Pillow>=9.1.0"
+```
+
+Then enable vector search:
+
+```bash
+RETRIEVAL_ENABLE_SEMANTIC=true
 ```
 
 ### 2. Set Up Your Environment
@@ -150,7 +163,7 @@ tail -f bot.log
 
 ## Repository Retrieval Engine
 
-Repository-aware questions use a deterministic retrieval layer before any LLM call:
+Repository-aware questions use a deterministic retrieval layer before any LLM call. When semantic retrieval is enabled, vector search is added as another ranking signal:
 
 ```
 user question
@@ -161,12 +174,14 @@ FileRanker + SymbolRanker
   ->
 limited DependencyMapper expansion
   ->
+optional EmbeddingIndexBuilder vector search
+  ->
 ContextAssembler focused snippets
   ->
 LLM prompt context
 ```
 
-This layer ranks files, symbols, and snippets with path, symbol, import, dependency, and working-tree signals. It does not use embeddings, vector databases, LangChain, LangGraph, RAG, or autonomous code modification.
+This layer ranks files, symbols, and snippets with path, symbol, import, dependency, working-tree, and optional semantic signals. It does not use LangChain, LangGraph, autonomous planning, or autonomous code modification.
 
 Useful local examples:
 
@@ -203,6 +218,73 @@ RETRIEVAL_MAX_SYMBOLS=12
 RETRIEVAL_DEPENDENCY_LIMIT=2
 RETRIEVAL_MAX_CONTEXT_CHARS=24000
 RETRIEVAL_SNIPPET_RADIUS=8
+RETRIEVAL_ENABLE_SEMANTIC=false
+EMBEDDING_SEARCH_LIMIT=6
+```
+
+## Embeddings & Vector Search
+
+Semantic retrieval is additive infrastructure. It chunks code into meaningful units, embeds those chunks, stores vectors, and returns semantic matches that can be merged into normal repository retrieval.
+
+```
+RepositoryIndexer
+  ->
+CodeChunker
+  ->
+EmbeddingService
+  ->
+VectorStore
+  ->
+EmbeddingIndexBuilder
+  ->
+RepositoryRetrievalEngine
+```
+
+The embedding service lazily uses `sentence-transformers` with `all-MiniLM-L6-v2` when available. If the package or model is unavailable, it falls back to deterministic hash embeddings so local tests and offline development still work. The vector store uses ChromaDB when installed and falls back to in-memory cosine search otherwise.
+
+Chunking example:
+
+```python
+from src.repository.repository_indexer import RepositoryIndexer
+from src.embeddings import CodeChunker
+
+index = RepositoryIndexer().ensure_index(".")
+chunks = CodeChunker().chunk_repository(index)
+
+for chunk in chunks[:5]:
+    print(chunk.file_path, chunk.symbol_name, chunk.chunk_type)
+```
+
+Semantic search example:
+
+```python
+from src.embeddings import EmbeddingIndexBuilder
+
+builder = EmbeddingIndexBuilder()
+builder.build_index(".")
+response = builder.semantic_search(".", "Where do we create temporary login links?")
+
+for result in response.results:
+    print(result.chunk.file_path, result.chunk.symbol_name, result.similarity_score)
+```
+
+Incremental indexing example:
+
+```python
+from src.embeddings import EmbeddingIndexBuilder
+
+builder = EmbeddingIndexBuilder()
+builder.update_index(".")
+builder.reindex_changed_files(".")
+```
+
+Embedding controls:
+
+```
+EMBEDDING_MAX_CHUNK_CHARS=2400
+EMBEDDING_FALLBACK_LINES=80
+EMBEDDING_FALLBACK_DIMENSION=384
+EMBEDDING_FORCE_FALLBACK=false
 ```
 
 ## Repository-Aware Debugging

@@ -38,6 +38,20 @@ def int_env(
     return value
 
 
+def bool_env(name: str, default: bool = False) -> bool:
+    """Read a boolean environment variable with common truthy/falsy values."""
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def ai_max_output_tokens(
     provider_env: str,
     default: int = DEFAULT_AI_MAX_OUTPUT_TOKENS,
