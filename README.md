@@ -29,6 +29,7 @@ slack-claude-bot/
 │   ├── repository/                ← Recursive repository scanner
 │   ├── retrieval/                 ← Deterministic file/symbol/snippet retrieval
 │   ├── modification/              ← Safe targeted repository modification
+│   ├── validation/                ← Syntax, import, test, lint verification
 │   ├── llm/                       ← Provider fallback and continuation handling
 │   ├── prompts/                   ← System prompt and prompt builder
 │   ├── memory/                    ← Conversation history access
@@ -350,6 +351,75 @@ Optional validation:
 
 ```
 MODIFICATION_RUN_PYTEST=true
+```
+
+## Validation & Verification Engine
+
+Generated patches are verified before they are treated as successful. The validation layer is modular and does not retry, fix, commit, push, or run autonomous loops:
+
+```
+CodePatch
+  ↓
+SyntaxValidator
+  ↓
+ImportChecker
+  ↓
+TestRunner
+  ↓
+LintRunner
+  ↓
+ValidationReporter
+  ↓
+ValidationReport
+```
+
+Patch validation runs tests and linting against a temporary repository overlay, so proposed code can be checked without modifying the real working tree.
+
+Useful local examples:
+
+```python
+from src.modification import CodePatch, PatchChange
+from src.validation import ValidationEngine
+
+patch = CodePatch(
+    summary="Update value.",
+    changes=[
+        PatchChange(
+            file_path="example.py",
+            old_content="value = 1\n",
+            new_content="value = 2\n",
+        )
+    ],
+)
+
+report = ValidationEngine().validate_patch(patch, ".")
+print(report.report_text)
+```
+
+```python
+from src.validation import TestRunner
+
+result = TestRunner(timeout_seconds=30).run_tests(
+    ".",
+    command=["python3", "-m", "unittest", "discover", "-s", "tests"],
+)
+print(result.summary)
+```
+
+```python
+from src.validation import LintRunner
+
+runner = LintRunner()
+print(runner.detect_linters())
+print(runner.run_linting(".").summary)
+```
+
+Validation controls:
+
+```
+VALIDATION_TEST_TIMEOUT_SECONDS=90
+VALIDATION_LINT_TIMEOUT_SECONDS=60
+VALIDATION_TEST_COMMAND=python3 -m unittest discover -s tests
 ```
 
 ---

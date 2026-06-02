@@ -10,6 +10,8 @@ from src.modification.file_editor import AppliedFileChange, FileBackup, FileUpda
 from src.modification.modification_models import CodePatch, PatchChange
 from src.modification.safety_guard import SafetyGuard, SafetyResult
 from src.utils.helpers import get_logger
+from src.validation.validation_engine import ValidationEngine
+from src.validation.validation_models import ValidationReport
 
 log = get_logger(__name__)
 
@@ -29,6 +31,7 @@ class AppliedPatch:
     patch: CodePatch
     applied_changes: list[AppliedFileChange] = field(default_factory=list)
     safety: SafetyResult = field(default_factory=SafetyResult)
+    validation_report: ValidationReport | None = None
 
     @property
     def changed_paths(self) -> list[str]:
@@ -43,9 +46,13 @@ class PatchApplier:
         self,
         file_editor: SafeFileEditor | None = None,
         safety_guard: SafetyGuard | None = None,
+        validation_engine: ValidationEngine | None = None,
+        validate_before_apply: bool = True,
     ) -> None:
         self.file_editor = file_editor or SafeFileEditor()
         self.safety_guard = safety_guard or SafetyGuard()
+        self.validation_engine = validation_engine or ValidationEngine()
+        self.validate_before_apply = validate_before_apply
 
     def apply_patch(
         self,
@@ -60,6 +67,12 @@ class PatchApplier:
         if safety.approval_required and not approved:
             raise ApprovalRequiredError("Patch requires explicit approval before application.")
 
+        validation_report: ValidationReport | None = None
+        if self.validate_before_apply:
+            validation_report = self.validation_engine.validate_patch(patch, project_path=project_path)
+            if not validation_report.ok:
+                raise PatchApplyError("Patch failed validation before application.")
+
         updates = [
             self._update_from_change(change, project_path)
             for change in patch.changes
@@ -67,7 +80,12 @@ class PatchApplier:
         ]
         applied_changes = self.file_editor.apply_file_changes(updates, repo_root=project_path)
         log.info("Applied approved patch files=%d", len(applied_changes))
-        return AppliedPatch(patch=patch, applied_changes=applied_changes, safety=safety)
+        return AppliedPatch(
+            patch=patch,
+            applied_changes=applied_changes,
+            safety=safety,
+            validation_report=validation_report,
+        )
 
     def rollback_patch(
         self,

@@ -17,6 +17,7 @@ from src.modification.safety_guard import SafetyGuard
 from src.repository.context_selector import ContextSelection, ContextSelector, SelectedFile
 from src.repository.repository_indexer import RepositoryIndexer
 from src.utils.helpers import get_logger
+from src.validation.validation_engine import ValidationEngine
 
 log = get_logger(__name__)
 
@@ -34,6 +35,7 @@ class CodeModifier:
         patch_applier: PatchApplier | None = None,
         file_editor: SafeFileEditor | None = None,
         validator: ChangeValidator | None = None,
+        validation_engine: ValidationEngine | None = None,
         stacktrace_parser: StacktraceParser | None = None,
         bug_context_builder: BugContextBuilder | None = None,
     ) -> None:
@@ -48,6 +50,7 @@ class CodeModifier:
             safety_guard=self.safety_guard,
         )
         self.validator = validator or ChangeValidator(indexer=self.indexer)
+        self.validation_engine = validation_engine or ValidationEngine(indexer=self.indexer)
         self.stacktrace_parser = stacktrace_parser or StacktraceParser()
         self.bug_context_builder = bug_context_builder or BugContextBuilder(indexer=self.indexer)
 
@@ -159,12 +162,9 @@ class CodeModifier:
         file_diffs = self.diff_generator.generate_file_diffs(patch)
         unified_diff = self.diff_generator.generate_diff(patch)
         safety = self.safety_guard.validate_modification(patch, project_path=project_path)
-        deleted_paths = {path for path, content in proposed.items() if content is None}
-        validation = self.validator.validate(
+        validation_report = self.validation_engine.validate_patch(
+            patch=patch,
             project_path=project_path,
-            proposed_files=proposed,
-            deleted_paths=deleted_paths,
-            run_pytest=False,
             request_id=request.request_id,
         )
 
@@ -175,14 +175,15 @@ class CodeModifier:
             file_diffs=file_diffs,
             change_summaries=self.diff_generator.summarize_changes(patch),
             safety_issues=safety.issues,
-            validation_report=validation.format_report(),
-            validation_ok=validation.ok,
+            validation_report=validation_report.report_text,
+            validation_ok=validation_report.ok,
             applied=False,
             approval_required=safety.approval_required,
             message="Generated a reviewable diff only; no files were modified.",
             metadata={
                 "context_files": request.selected_files,
-                "checks_run": validation.checks_run,
+                "validation_status": validation_report.status,
+                "validation_confidence": validation_report.confidence_score,
                 "snapshots": sorted(snapshots),
                 "risk_notes": patch_set.risk_notes,
             },
