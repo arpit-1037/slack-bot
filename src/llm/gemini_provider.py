@@ -7,6 +7,8 @@ import os
 from src.llm.continuation_handler import CONTINUE_PROMPT, ContinuationHandler
 from src.utils.helpers import ai_max_output_tokens
 
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+
 
 class GeminiProvider:
     """Call Gemini with prompt flattening and continuation support."""
@@ -36,7 +38,7 @@ class GeminiProvider:
 
         while True:
             response = client.models.generate_content(
-                model="gemini-2.0-flash",
+                model=os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
                 contents=current_prompt,
                 config=types.GenerateContentConfig(
                     max_output_tokens=ai_max_output_tokens("GEMINI_MAX_OUTPUT_TOKENS"),

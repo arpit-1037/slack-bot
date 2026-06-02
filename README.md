@@ -60,7 +60,10 @@ SLACK_BOT_TOKEN=xoxb-...        ← From Slack App → OAuth & Permissions
 SLACK_SIGNING_SECRET=...        ← From Slack App → Basic Information
 GROQ_API_KEY=gsk-...
 GEMINI_API_KEY=...
+ANTHROPIC_API_KEY=sk-ant-...    ← Claude/Anthropic API key
 OPENAI_API_KEY=sk-...
+AI_PROVIDER_ORDER=gemini        ← Use only Gemini for bot responses
+GEMINI_MODEL=gemini-2.5-flash
 GIT_REPO_PATH=/absolute/path/to/project
 ```
 

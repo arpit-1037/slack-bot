@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from typing import Protocol
 
+from src.llm.claude_provider import ClaudeProvider
 from src.llm.gemini_provider import GeminiProvider
 from src.llm.groq_provider import GroqProvider
 from src.llm.openai_provider import OpenAIProvider
@@ -29,9 +31,37 @@ class ProviderRouter:
     """Try configured LLM providers in the existing fallback order."""
 
     def __init__(self, providers: list[Provider] | None = None) -> None:
-        self.providers = providers or [
+        self.providers = providers or self._default_providers()
+
+    def _default_providers(self) -> list[Provider]:
+        """Build provider order from env config or the standard fallback order."""
+        provider_factories = {
+            "groq": GroqProvider,
+            "gemini": GeminiProvider,
+            "claude": ClaudeProvider,
+            "anthropic": ClaudeProvider,
+            "openai": OpenAIProvider,
+        }
+        configured_order = [
+            item.strip().lower()
+            for item in os.getenv("AI_PROVIDER_ORDER", "").split(",")
+            if item.strip()
+        ]
+        if configured_order:
+            providers = []
+            for provider_name in configured_order:
+                factory = provider_factories.get(provider_name)
+                if factory is None:
+                    log.warning("Ignoring unknown AI provider in AI_PROVIDER_ORDER: %s", provider_name)
+                    continue
+                providers.append(factory())
+            if providers:
+                return providers
+
+        return [
             GroqProvider(),
             GeminiProvider(),
+            ClaudeProvider(),
             OpenAIProvider(),
         ]
 

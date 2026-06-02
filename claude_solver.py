@@ -12,6 +12,7 @@ import logging
 from dotenv import load_dotenv
 
 from src.executor.task_executor import TaskExecutor
+from src.llm.claude_provider import ClaudeProvider
 from src.llm.continuation_handler import needs_continuation
 from src.llm.gemini_provider import GeminiProvider
 from src.llm.groq_provider import GroqProvider
@@ -176,6 +177,11 @@ def solve_with_groq(messages: list[dict]) -> str:
 def solve_with_gemini(messages: list[dict]) -> str:
     """Legacy wrapper for Gemini completion."""
     return GeminiProvider().complete(messages)
+
+
+def solve_with_claude(messages: list[dict]) -> str:
+    """Legacy wrapper for Claude completion."""
+    return ClaudeProvider().complete(messages)
 
 
 def solve_with_openai(messages: list[dict]) -> str:
