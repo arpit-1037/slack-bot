@@ -27,6 +27,7 @@ slack-claude-bot/
 │   ├── executor/                  ← Tool execution and orchestration
 │   ├── tools/                     ← Git, repository, web, terminal, conversation tools
 │   ├── repository/                ← Recursive repository scanner
+│   ├── retrieval/                 ← Deterministic file/symbol/snippet retrieval
 │   ├── modification/              ← Safe targeted repository modification
 │   ├── llm/                       ← Provider fallback and continuation handling
 │   ├── prompts/                   ← System prompt and prompt builder
@@ -146,6 +147,63 @@ All activity is logged to `bot.log`, including request lifecycle ids:
 tail -f bot.log
 ```
 
+## Repository Retrieval Engine
+
+Repository-aware questions use a deterministic retrieval layer before any LLM call:
+
+```
+user question
+  ->
+RepositoryRetrievalEngine
+  ->
+FileRanker + SymbolRanker
+  ->
+limited DependencyMapper expansion
+  ->
+ContextAssembler focused snippets
+  ->
+LLM prompt context
+```
+
+This layer ranks files, symbols, and snippets with path, symbol, import, dependency, and working-tree signals. It does not use embeddings, vector databases, LangChain, LangGraph, RAG, or autonomous code modification.
+
+Useful local examples:
+
+```python
+from src.retrieval import RepositoryRetrievalEngine
+
+engine = RepositoryRetrievalEngine()
+result = engine.retrieve_context(".", "Where is JWT implemented?")
+
+for file in result.files:
+    print(file.path, file.score, file.reasons)
+
+for symbol in result.symbols:
+    print(symbol.name, symbol.kind, symbol.file_path, symbol.score)
+
+print(result.context.format_context())
+```
+
+Questions that benefit from retrieval:
+
+```
+Where is JWT implemented?
+Which file handles Slack events?
+What service performs authentication?
+Which files are related to Redis?
+What changed login behavior?
+```
+
+Retrieval limits:
+
+```
+RETRIEVAL_MAX_FILES=6
+RETRIEVAL_MAX_SYMBOLS=12
+RETRIEVAL_DEPENDENCY_LIMIT=2
+RETRIEVAL_MAX_CONTEXT_CHARS=24000
+RETRIEVAL_SNIPPET_RADIUS=8
+```
+
 ## Repository-Aware Debugging
 
 Debugging tasks now use a focused repository workflow instead of sending a broad code dump:
@@ -157,7 +215,7 @@ StacktraceParser
   ↓
 BugContextBuilder
   ↓
-RepositoryIndexer + DependencyMapper + ContextSelector
+RepositoryIndexer + DependencyMapper + RepositoryRetrievalEngine
   ↓
 DebugPromptBuilder
   ↓
@@ -201,7 +259,7 @@ RepositoryStateRefresher
   ↓
 RepositoryStateCache
   ↓
-RepositoryIndexer + DependencyMapper + ContextSelector
+RepositoryIndexer + DependencyMapper + RepositoryRetrievalEngine
 ```
 
 The state tracks branch, HEAD commit, indexed timestamps, supported file counts, Python file counts, changed files, staged files, untracked files, and health signals.
@@ -233,43 +291,59 @@ REPOSITORY_STATE_CACHE_DIR=/absolute/cache/dir
 
 ## Safe Repository Modification
 
-Modification tasks use an explicit guarded workflow instead of naive file rewriting:
+Modification tasks use an explicit guarded workflow instead of naive file rewriting. The Slack route is preview-first: it generates a patch, produces a diff, validates safety, and waits for approval before any filesystem write.
 
 ```
 modification request
   ↓
-RepositoryIndexer + ContextSelector
+RepositoryRetrievalEngine + ContextSelector
+  ↓
+ModificationRequest
   ↓
 PatchGenerator structured operations
   ↓
-DiffManager preview
+CodeModifier preview
   ↓
-ChangeValidator syntax/import checks
+SafetyGuard + ChangeValidator
   ↓
-SafeFileEditor atomic apply + backup
+DiffGenerator review output
+  ↓
+approval wait
 ```
 
 Useful local examples:
 
 ```python
-from src.modification.patch_generator import PatchGenerator, PatchOperation
+from src.modification import CodePatch, DiffGenerator, PatchChange
 
-original = {"example.py": "def greet():\n    return 'hi'\n"}
-operation = PatchOperation(
-    op="replace",
-    path="example.py",
-    target_type="function",
-    target="greet",
-    content="def greet():\n    return 'hello'\n",
+patch = CodePatch(
+    summary="Update greeting.",
+    changes=[
+        PatchChange(
+            file_path="example.py",
+            old_content="def greet():\n    return 'hi'\n",
+            new_content="def greet():\n    return 'hello'\n",
+            modification_reason="Return the intended greeting.",
+        )
+    ],
 )
-print(PatchGenerator().apply_operations(original, [operation])["example.py"])
+
+print(DiffGenerator().generate_diff(patch))
 ```
 
 ```python
-from src.modification.change_validator import ChangeValidator
+from src.modification import SafetyGuard
 
-result = ChangeValidator().validate(".", {"example.py": "def ok():\n    return True\n"})
-print(result.format_report())
+result = SafetyGuard().validate_modification(patch)
+print(result.ok, result.approval_required)
+```
+
+```python
+from src.modification import PatchApplier
+
+applier = PatchApplier()
+applied = applier.apply_patch(patch, ".", approved=True)
+applier.rollback_patch(applied, ".")
 ```
 
 Optional validation:

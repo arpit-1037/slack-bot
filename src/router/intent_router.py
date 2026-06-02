@@ -28,6 +28,9 @@ class IntentRouter:
         if self._is_project_debug_query(task_lower):
             return "project_debug"
 
+        if self._is_project_retrieval_query(task_lower):
+            return "project_retrieval"
+
         generic_code_signals = [
             "write code", "code in", "example in", "program in",
             "reverse string", "java code", "python code", "javascript code",
@@ -72,6 +75,27 @@ class IntentRouter:
             any(signal in task_lower for signal in changed_flow_signals)
             and any(signal in task_lower for signal in code_area_signals)
         )
+
+    def _is_project_retrieval_query(self, task_lower: str) -> bool:
+        """Return True for repository lookup questions that need focused retrieval."""
+        lookup_signals = [
+            "where is", "where are", "which file", "which files", "what file",
+            "what files", "which module", "what module", "which service",
+            "what service", "find", "locate", "show me", "related to",
+            "handles", "handle", "implemented", "implements", "performs",
+            "used by", "uses", "depends on", "imports",
+        ]
+        if not any(signal in task_lower for signal in lookup_signals):
+            return False
+
+        repository_signals = [
+            "repo", "repository", "project", "codebase", "file", "files",
+            "module", "class", "function", "method", "service", "handler",
+            "controller", "route", "auth", "authentication", "jwt", "login",
+            "middleware", "redis", "database", "slack", "event", "events",
+            "import", "dependency", ".py", ".js", ".ts", ".php", "src/",
+        ]
+        return any(signal in task_lower for signal in repository_signals)
 
     def _is_project_modification_query(self, task_lower: str) -> bool:
         """Return True when the user is asking for repository code changes."""

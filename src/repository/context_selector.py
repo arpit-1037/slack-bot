@@ -10,6 +10,10 @@ from typing import Any
 from src.repository.dependency_mapper import DependencyMapper
 from src.repository.repository_indexer import FileIndexEntry, RepositoryIndexer
 from src.repository.repository_state import RepositoryState
+from src.retrieval.context_assembler import ContextAssembler
+from src.retrieval.file_ranker import query_terms as retrieval_query_terms
+from src.retrieval.retrieval_engine import RepositoryRetrievalEngine
+from src.retrieval.retrieval_models import RankedFile, RankedSymbol
 from src.utils.helpers import get_logger, int_env
 
 log = get_logger(__name__)
@@ -68,6 +72,7 @@ class ContextSelector:
         self,
         indexer: RepositoryIndexer | None = None,
         dependency_mapper: DependencyMapper | None = None,
+        retrieval_engine: RepositoryRetrievalEngine | None = None,
         max_files: int | None = None,
         max_total_chars: int | None = None,
         max_file_chars: int | None = None,
@@ -77,6 +82,18 @@ class ContextSelector:
         self.max_files = max_files or int_env("REPOSITORY_CONTEXT_MAX_FILES", 6, 1)
         self.max_total_chars = max_total_chars or int_env("REPOSITORY_CONTEXT_MAX_CHARS", 24_000, 2_000)
         self.max_file_chars = max_file_chars or int_env("REPOSITORY_CONTEXT_MAX_FILE_CHARS", 6_000, 1_000)
+        self.retrieval_engine = retrieval_engine or RepositoryRetrievalEngine(
+            indexer=self.indexer,
+            dependency_mapper=self.dependency_mapper,
+            context_assembler=ContextAssembler(
+                max_total_chars=self.max_total_chars,
+                max_snippet_chars=self.max_file_chars,
+                max_file_excerpt_chars=self.max_file_chars,
+            ),
+            max_files=self.max_files,
+        )
+        self.indexer = self.retrieval_engine.indexer
+        self.dependency_mapper = self.retrieval_engine.dependency_mapper
 
     def select_context(
         self,
@@ -85,45 +102,61 @@ class ContextSelector:
         request_id: str | None = None,
     ) -> ContextSelection:
         """Build a compact repository context string for a task."""
-        index = self.indexer.ensure_index(project_path)
-        repository_state = self.indexer.repository_state or self.indexer.get_repository_state(project_path)
-        self.dependency_mapper.refresh(index, repository_state=repository_state)
-        terms = self.query_terms(task)
-
-        scored = self._score_files(index, terms)
-        selected_paths = self._select_paths(scored, index)
+        result = self.retrieval_engine.retrieve_context(
+            project_path=project_path,
+            query=task,
+            request_id=request_id,
+            max_files=self.max_files,
+        )
         selected_files = [
-            self._selected_file(path, score, reasons, index[path], terms)
-            for path, score, reasons in selected_paths
+            self._selected_file_from_retrieval(file, result.symbols)
+            for file in result.files
         ]
-        context = self._format_context(selected_files, index, repository_state)
+        context = result.context.format_context(max_chars=self.max_total_chars)
 
         log.info(
             "request_id=%s selected repository context files=%d chars=%d branch=%s terms=%s",
             request_id,
             len(selected_files),
             len(context),
-            repository_state.branch or "unknown",
-            ",".join(sorted(terms)),
+            result.context.repository_summary.get("metadata", {}).get("branch") or "unknown",
+            ",".join(result.terms),
         )
         return ContextSelection(
             task=task,
             selected_files=selected_files,
             context=context,
-            repository_summary=repository_state.as_summary_dict(),
+            repository_summary=result.context.repository_summary,
         )
 
     def query_terms(self, task: str) -> set[str]:
         """Tokenize and expand a task into deterministic repository search terms."""
-        raw_terms = {
-            term.lower()
-            for term in re.split(r"[^A-Za-z0-9_]+", task)
-            if len(term) >= 2
-        }
-        terms = {term for term in raw_terms if term not in STOPWORDS}
-        for term in list(terms):
-            terms.update(QUERY_EXPANSIONS.get(term, set()))
-        return terms
+        return retrieval_query_terms(task)
+
+    def _selected_file_from_retrieval(
+        self,
+        file: RankedFile,
+        symbols: list[RankedSymbol],
+    ) -> SelectedFile:
+        """Convert retrieval file metadata to the legacy context-selection model."""
+        file_symbols = [symbol for symbol in symbols if symbol.file_path == file.path]
+        functions = []
+        classes = []
+        for symbol in file_symbols:
+            if symbol.kind == "class":
+                classes.append(symbol.name)
+            elif symbol.kind == "method" and symbol.source_metadata.get("class"):
+                functions.append(f"{symbol.source_metadata['class']}.{symbol.name}")
+            else:
+                functions.append(symbol.name)
+
+        return SelectedFile(
+            path=file.path,
+            score=file.score,
+            reasons=file.reasons,
+            functions=sorted(set(functions)),
+            classes=sorted(set(classes)),
+        )
 
     def _score_files(
         self,

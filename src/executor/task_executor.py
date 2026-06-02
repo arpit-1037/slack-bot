@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from src.debugging.repository_debugger import RepositoryDebugger
 from src.llm.provider_router import ProviderRouter
+from src.modification.code_modifier import CodeModifier
 from src.modification.patch_generator import PatchGenerator
 from src.modification.repository_modifier import RepositoryModifier
 from src.planner.task_planner import TaskPlan
@@ -28,6 +29,7 @@ class TaskExecutor:
         provider_router: ProviderRouter | None = None,
         repository_debugger: RepositoryDebugger | None = None,
         repository_modifier: RepositoryModifier | None = None,
+        code_modifier: CodeModifier | None = None,
     ) -> None:
         self.git_tool = git_tool or GitTool()
         self.repository_tool = repository_tool or RepositoryTool()
@@ -38,6 +40,9 @@ class TaskExecutor:
             provider_router=self.provider_router
         )
         self.repository_modifier = repository_modifier or RepositoryModifier(
+            patch_generator=PatchGenerator(provider_router=self.provider_router)
+        )
+        self.code_modifier = code_modifier or CodeModifier(
             patch_generator=PatchGenerator(provider_router=self.provider_router)
         )
 
@@ -83,14 +88,14 @@ class TaskExecutor:
             )
 
         if plan.use_repository_modifier:
-            return self.repository_modifier.modify(
+            return self.code_modifier.modify_code(
                 project_path=self.git_tool.repo_path,
-                task=plan.clean_task,
+                user_request=plan.clean_task,
                 thread_ts=thread_ts,
                 channel=channel,
                 slack_user=slack_user,
                 request_id=request_id,
-            )
+            ).format_response()
 
         git_context = "Not needed for this task."
         code_context = "Not needed for this task."
@@ -101,8 +106,19 @@ class TaskExecutor:
             git_context = self.git_tool.get_git_context()
 
         if plan.needs_repository_context:
-            log.info("request_id=%s scanning repository context", request_id)
-            code_context = self.repository_tool.read_codebase(self.git_tool.repo_path)
+            log.info("request_id=%s retrieving repository context", request_id)
+            selection = self.repository_tool.select_context(
+                project_path=self.git_tool.repo_path,
+                task=plan.clean_task,
+                request_id=request_id,
+            )
+            code_context = selection.context
+            log.info(
+                "request_id=%s retrieved repository context files=%d chars=%d",
+                request_id,
+                len(selection.selected_files),
+                len(code_context),
+            )
 
         if plan.needs_web_search:
             log.info("request_id=%s collecting web search context", request_id)

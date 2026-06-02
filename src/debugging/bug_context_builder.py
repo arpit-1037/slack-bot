@@ -11,6 +11,10 @@ from src.repository.context_selector import ContextSelector
 from src.repository.dependency_mapper import DependencyMapper
 from src.repository.repository_indexer import FileIndexEntry, RepositoryIndexer
 from src.repository.repository_state import RepositoryState
+from src.retrieval.file_ranker import query_terms as retrieval_query_terms
+from src.retrieval.retrieval_engine import RepositoryRetrievalEngine
+from src.retrieval.retrieval_models import CodeSnippet as RetrievalCodeSnippet
+from src.retrieval.retrieval_models import RankedFile, RetrievalResult
 from src.utils.helpers import get_logger, int_env
 
 log = get_logger(__name__)
@@ -107,16 +111,29 @@ class BugContextBuilder:
         indexer: RepositoryIndexer | None = None,
         dependency_mapper: DependencyMapper | None = None,
         context_selector: ContextSelector | None = None,
+        retrieval_engine: RepositoryRetrievalEngine | None = None,
         max_files: int | None = None,
         snippet_radius: int | None = None,
         max_file_chars: int | None = None,
     ) -> None:
         self.indexer = indexer or RepositoryIndexer()
         self.dependency_mapper = dependency_mapper or DependencyMapper()
-        self.context_selector = context_selector or ContextSelector(indexer=self.indexer)
         self.max_files = max_files or int_env("DEBUG_CONTEXT_MAX_FILES", 5, 1)
         self.snippet_radius = snippet_radius or int_env("DEBUG_SNIPPET_RADIUS", 14, 3)
         self.max_file_chars = max_file_chars or int_env("DEBUG_CONTEXT_MAX_FILE_CHARS", 5_000, 500)
+        self.retrieval_engine = retrieval_engine or RepositoryRetrievalEngine(
+            indexer=self.indexer,
+            dependency_mapper=self.dependency_mapper,
+            max_files=self.max_files,
+        )
+        self.indexer = self.retrieval_engine.indexer
+        self.dependency_mapper = self.retrieval_engine.dependency_mapper
+        self.context_selector = context_selector or ContextSelector(
+            indexer=self.indexer,
+            dependency_mapper=self.dependency_mapper,
+            retrieval_engine=self.retrieval_engine,
+            max_files=self.max_files,
+        )
 
     def build(
         self,
@@ -126,16 +143,29 @@ class BugContextBuilder:
         request_id: str | None = None,
     ) -> BugContext:
         """Build a focused bug context from stacktrace, explicit refs, and index signals."""
-        index = self.indexer.ensure_index(project_path)
+        retrieval_query = self._retrieval_query(bug_description, stacktrace)
+        retrieval_result = self.retrieval_engine.retrieve_context(
+            project_path=project_path,
+            query=retrieval_query,
+            request_id=request_id,
+            max_files=self.max_files,
+        )
+        index = self.indexer.files or self.indexer.ensure_index(project_path)
         repository_state = self.indexer.repository_state or self.indexer.get_repository_state(project_path)
-        self.dependency_mapper.refresh(index, repository_state=repository_state)
-        selection = self.context_selector.select_context(project_path, bug_description, request_id=request_id)
-        terms = self.context_selector.query_terms(bug_description)
+        terms = retrieval_query_terms(retrieval_query)
 
-        candidates = self._candidate_paths(index, bug_description, stacktrace, selection.selected_files)
+        candidates = self._candidate_paths(index, bug_description, stacktrace, retrieval_result.files)
         expanded = self._expand_dependencies(candidates, index)
+        retrieval_snippets = self._retrieval_snippets_by_file(retrieval_result)
         files = [
-            self._build_file_context(path, reasons, index[path], stacktrace, terms)
+            self._build_file_context(
+                path,
+                reasons,
+                index[path],
+                stacktrace,
+                terms,
+                retrieval_snippets.get(path, []),
+            )
             for path, reasons in expanded[: self.max_files]
             if path in index
         ]
@@ -155,14 +185,25 @@ class BugContextBuilder:
             repository_state=repository_state,
         )
 
+    def _retrieval_query(self, bug_description: str, stacktrace: ParsedStackTrace) -> str:
+        """Build a retrieval query enriched with stacktrace file and function hints."""
+        parts = [bug_description]
+        if stacktrace.error_type:
+            parts.append(stacktrace.error_type)
+        if stacktrace.error_message:
+            parts.append(stacktrace.error_message)
+        parts.extend(stacktrace.files)
+        parts.extend(stacktrace.functions)
+        return " ".join(part for part in parts if part)
+
     def _candidate_paths(
         self,
         index: dict[str, FileIndexEntry],
         bug_description: str,
         stacktrace: ParsedStackTrace,
-        selected_files,
+        ranked_files: list[RankedFile],
     ) -> list[tuple[str, list[str]]]:
-        """Find candidate repository paths from stacktrace, file refs, and selector output."""
+        """Find candidate repository paths from stacktrace, file refs, and retrieval output."""
         candidates: dict[str, list[str]] = {}
 
         for frame in stacktrace.frames:
@@ -174,8 +215,8 @@ class BugContextBuilder:
             for path in self._match_repo_paths(index, ref_path):
                 candidates.setdefault(path, []).append(reason)
 
-        for selected in selected_files:
-            candidates.setdefault(selected.path, []).append("selector:" + ",".join(selected.reasons[:3]))
+        for ranked_file in ranked_files:
+            candidates.setdefault(ranked_file.path, []).append("retrieval:" + ",".join(ranked_file.reasons[:3]))
 
         ranked = [
             (path, sorted(set(reasons)))
@@ -213,6 +254,7 @@ class BugContextBuilder:
         entry: FileIndexEntry,
         stacktrace: ParsedStackTrace,
         terms: set[str],
+        retrieval_snippets: list[RetrievalCodeSnippet],
     ) -> DebugFileContext:
         """Build bounded debugging context for one file."""
         stack_lines = [
@@ -225,7 +267,10 @@ class BugContextBuilder:
             for frame in stacktrace.frames
             if self._path_matches(path, frame.filename)
         }
-        snippets = self._snippets_for_file(entry, stack_lines, stack_functions)
+        if retrieval_snippets and not stack_lines and not stack_functions:
+            snippets = self._convert_retrieval_snippets(retrieval_snippets)
+        else:
+            snippets = self._snippets_for_file(entry, stack_lines, stack_functions)
         return DebugFileContext(
             path=path,
             reasons=reasons,
@@ -236,6 +281,30 @@ class BugContextBuilder:
             dependencies=self.dependency_mapper.get_dependencies(path)[:4],
             dependents=self.dependency_mapper.get_dependents(path)[:4],
         )
+
+    def _retrieval_snippets_by_file(
+        self,
+        retrieval_result: RetrievalResult,
+    ) -> dict[str, list[RetrievalCodeSnippet]]:
+        """Group retrieval snippets by file path for debug context reuse."""
+        snippets: dict[str, list[RetrievalCodeSnippet]] = {}
+        for snippet in retrieval_result.context.snippets:
+            snippets.setdefault(snippet.file_path, []).append(snippet)
+        return snippets
+
+    def _convert_retrieval_snippets(
+        self,
+        snippets: list[RetrievalCodeSnippet],
+    ) -> list[CodeSnippet]:
+        """Convert retrieval snippets to debugging context snippets."""
+        return [
+            CodeSnippet(
+                line_start=snippet.line_start,
+                line_end=snippet.line_end,
+                content=snippet.content,
+            )
+            for snippet in snippets[:3]
+        ]
 
     def _snippets_for_file(
         self,
@@ -365,6 +434,6 @@ class BugContextBuilder:
             return 0
         if "mentioned" in joined:
             return 1
-        if "selector:" in joined:
+        if "retrieval:" in joined or "selector:" in joined:
             return 2
         return 3

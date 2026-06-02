@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from src.llm.provider_router import ProviderRouter
+from src.modification.modification_models import CodePatch, ModificationRequest
 from src.repository.context_selector import ContextSelection
 from src.utils.helpers import get_logger
 
@@ -102,6 +103,54 @@ class PatchGenerator:
 
     def __init__(self, provider_router: ProviderRouter | None = None) -> None:
         self.provider_router = provider_router or ProviderRouter()
+
+    def generate_patch(
+        self,
+        request: ModificationRequest,
+        request_id: str | None = None,
+    ) -> CodePatch:
+        """Generate a strongly typed code patch from retrieved repository context."""
+        active_request_id = request_id or request.request_id
+        raw_response = self.provider_router.complete(
+            self._build_code_patch_messages(request),
+            request_id=active_request_id,
+        )
+        patch_data = self._parse_patch_json(raw_response)
+        patch = CodePatch.from_dict(
+            patch_data,
+            request_id=active_request_id,
+            default_reason=request.user_request,
+        )
+        issues = self.validate_patch_structure(patch)
+        if issues:
+            raise PatchGenerationError("Invalid code patch: " + "; ".join(issues))
+        log.info(
+            "request_id=%s generated code patch changes=%d paths=%s",
+            active_request_id,
+            len(patch.changes),
+            ",".join(patch.affected_paths),
+        )
+        return patch
+
+    def validate_patch_structure(self, patch: CodePatch | Mapping[str, Any]) -> list[str]:
+        """Return structural issues for a generated code patch."""
+        if isinstance(patch, Mapping):
+            patch = CodePatch.from_dict(patch)
+
+        issues = []
+        if not patch.summary.strip():
+            issues.append("patch summary is required")
+        for index, change in enumerate(patch.changes, start=1):
+            label = f"change {index}"
+            if not change.file_path:
+                issues.append(f"{label} missing file_path")
+            if change.old_content is None and change.new_content is None:
+                issues.append(f"{label} has no old_content or new_content")
+            if change.old_content == change.new_content:
+                issues.append(f"{label} does not change file content")
+            if change.file_path.startswith("/") or ".." in change.file_path.replace("\\", "/").split("/"):
+                issues.append(f"{label} path must be repository-relative")
+        return issues
 
     def generate(
         self,
@@ -345,6 +394,52 @@ class PatchGenerator:
                     "}\n\n"
                     f"REPOSITORY CONTEXT:\n{context_selection.context}"
                     f"{debug_block}"
+                ),
+            },
+        ]
+
+    def _build_code_patch_messages(self, request: ModificationRequest) -> list[dict]:
+        """Build a prompt for direct CodePatch JSON generation."""
+        selected_files = ", ".join(request.selected_files) or "none supplied"
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "You generate safe code patch previews. Return JSON only. "
+                    "Do not apply changes, run commands, commit, push, or create pull requests."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Create a reviewable code patch for this repository request.\n\n"
+                    f"REQUEST:\n{request.user_request}\n\n"
+                    f"SELECTED FILES:\n{selected_files}\n\n"
+                    "Rules:\n"
+                    "- Use only repository-relative file paths.\n"
+                    "- Include old_content and new_content for each changed file.\n"
+                    "- Set old_content to null for created files.\n"
+                    "- Set new_content to null only for deleted files.\n"
+                    "- Keep changes minimal and explain each change.\n"
+                    "- If the request is unsafe or ambiguous, return an empty changes array and explain why.\n\n"
+                    "JSON schema:\n"
+                    "{\n"
+                    '  "summary": "short summary",\n'
+                    '  "diff_summary": "human readable summary",\n'
+                    '  "modification_reason": "why this patch is needed",\n'
+                    '  "approval_required": true,\n'
+                    '  "changes": [\n'
+                    "    {\n"
+                    '      "file_path": "repo/relative/file.py",\n'
+                    '      "old_content": "original file content or block",\n'
+                    '      "new_content": "new file content or block",\n'
+                    '      "diff_summary": "what changed in this file",\n'
+                    '      "modification_reason": "why this file changed",\n'
+                    '      "change_type": "create|modify|delete"\n'
+                    "    }\n"
+                    "  ]\n"
+                    "}\n\n"
+                    f"RETRIEVED REPOSITORY CONTEXT:\n{request.repository_context}"
                 ),
             },
         ]

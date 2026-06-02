@@ -95,7 +95,7 @@ class RepositoryModifier:
         channel: str | None = None,
         slack_user: str | None = None,
         request_id: str | None = None,
-        preview_only: bool = False,
+        preview_only: bool = True,
         run_pytest: bool | None = None,
     ) -> str:
         """Run the modification workflow and return a human-readable response."""
@@ -114,7 +114,7 @@ class RepositoryModifier:
         project_path: str,
         task: str,
         request_id: str | None = None,
-        preview_only: bool = False,
+        preview_only: bool = True,
         run_pytest: bool | None = None,
     ) -> ModificationResult:
         """Run analysis, patch generation, diff preview, validation, and safe apply."""

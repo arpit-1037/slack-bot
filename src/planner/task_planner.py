@@ -88,7 +88,7 @@ class TaskPlanner:
             clean_task=clean,
             intent=intent,
             needs_git_context=False,
-            needs_repository_context=False,
+            needs_repository_context=intent == "project_retrieval",
             needs_web_search=intent == "web",
             use_repository_debugger=intent == "project_debug",
             use_repository_modifier=intent == "project_modify",
