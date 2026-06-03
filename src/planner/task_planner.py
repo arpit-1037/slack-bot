@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.router.intent_router import IntentRouter, greeting_response
+from src.router.intent_router import IntentRouter, greeting_response, is_planning_query
 from src.tools.git_tool import is_git_action_query
 from src.utils.helpers import clean_slack_mentions, get_logger
 
@@ -24,6 +24,7 @@ class TaskPlan:
     needs_git_context: bool = False
     needs_repository_context: bool = False
     needs_web_search: bool = False
+    use_planning_engine: bool = False
     use_repository_debugger: bool = False
     use_repository_modifier: bool = False
 
@@ -45,6 +46,15 @@ class TaskPlanner:
                 clean_task=clean,
                 intent="empty",
                 direct_response="I did not receive a task. Please mention me with a task description.",
+            )
+
+        if is_planning_query(clean):
+            log.info("request_id=%s planning request detected before execution routing", request_id)
+            return TaskPlan(
+                original_task=task_text,
+                clean_task=clean,
+                intent="planning",
+                use_planning_engine=True,
             )
 
         if is_git_action_query(clean):
@@ -73,6 +83,14 @@ class TaskPlanner:
                 clean_task=clean,
                 intent=intent,
                 run_git_action=True,
+            )
+
+        if intent == "planning":
+            return TaskPlan(
+                original_task=task_text,
+                clean_task=clean,
+                intent=intent,
+                use_planning_engine=True,
             )
 
         if intent == "git":

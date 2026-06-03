@@ -7,6 +7,7 @@ from src.llm.provider_router import ProviderRouter
 from src.modification.code_modifier import CodeModifier
 from src.modification.patch_generator import PatchGenerator
 from src.modification.repository_modifier import RepositoryModifier
+from src.planning.planner import PlanningEngine
 from src.planner.task_planner import TaskPlan
 from src.prompts.prompt_builder import PromptBuilder
 from src.tools.git_tool import GitTool
@@ -30,6 +31,7 @@ class TaskExecutor:
         repository_debugger: RepositoryDebugger | None = None,
         repository_modifier: RepositoryModifier | None = None,
         code_modifier: CodeModifier | None = None,
+        planning_engine: PlanningEngine | None = None,
     ) -> None:
         self.git_tool = git_tool or GitTool()
         self.repository_tool = repository_tool or RepositoryTool()
@@ -45,6 +47,7 @@ class TaskExecutor:
         self.code_modifier = code_modifier or CodeModifier(
             patch_generator=PatchGenerator(provider_router=self.provider_router)
         )
+        self.planning_engine = planning_engine or PlanningEngine(git_tool=self.git_tool)
 
     def execute(
         self,
@@ -56,7 +59,7 @@ class TaskExecutor:
     ) -> str:
         """Execute the planned actions and return the Slack response text."""
         log.info(
-            "request_id=%s executing plan intent=%s git_action=%s raw_git=%s git_context=%s repo_context=%s web=%s repo_debug=%s repo_modify=%s",
+            "request_id=%s executing plan intent=%s git_action=%s raw_git=%s git_context=%s repo_context=%s web=%s planning=%s repo_debug=%s repo_modify=%s",
             request_id,
             plan.intent,
             plan.run_git_action,
@@ -64,6 +67,7 @@ class TaskExecutor:
             plan.needs_git_context,
             plan.needs_repository_context,
             plan.needs_web_search,
+            plan.use_planning_engine,
             plan.use_repository_debugger,
             plan.use_repository_modifier,
         )
@@ -76,6 +80,14 @@ class TaskExecutor:
 
         if plan.return_raw_git_diff:
             return self.git_tool.get_raw_diff()
+
+        if plan.use_planning_engine:
+            planning_plan = self.planning_engine.create_plan(
+                plan.clean_task,
+                project_path=self.git_tool.repo_path,
+                request_id=request_id,
+            )
+            return planning_plan.format_markdown()
 
         if plan.use_repository_debugger:
             return self.repository_debugger.debug(

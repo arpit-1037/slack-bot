@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from src.tools.git_tool import is_git_action_query, is_git_query
 
 
@@ -18,6 +20,9 @@ class IntentRouter:
         }
         if task_lower in greeting_words:
             return "greeting"
+
+        if is_planning_query(task_lower):
+            return "planning"
 
         if is_git_action_query(task_lower):
             return "git_action"
@@ -126,6 +131,41 @@ class IntentRouter:
 def classify_intent(task: str) -> str:
     """Compatibility helper for legacy callers."""
     return IntentRouter().classify(task)
+
+
+def is_planning_query(task: str) -> bool:
+    """Return True when the user explicitly wants a plan rather than execution."""
+    task_lower = task.lower().strip()
+    planning_signals = [
+        "create a plan",
+        "create an implementation plan",
+        "make a plan",
+        "generate a plan",
+        "give me a plan",
+        "give me an implementation plan",
+        "implementation plan",
+        "refactor plan",
+        "debugging plan",
+        "execution plan",
+        "plan for",
+        "plan to",
+    ]
+    if any(signal in task_lower for signal in planning_signals):
+        return True
+
+    if re.match(r"^how would you\s+", task_lower):
+        return any(
+            signal in task_lower
+            for signal in ("fix", "add", "implement", "refactor", "test", "change", "debug")
+        )
+
+    if re.match(r"^how should (?:i|we|you)\s+", task_lower):
+        return any(
+            signal in task_lower
+            for signal in ("fix", "add", "implement", "refactor", "test", "change", "debug")
+        )
+
+    return False
 
 
 def greeting_response() -> str:

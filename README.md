@@ -24,6 +24,7 @@ slack-claude-bot/
 │   ├── slack/                     ← Slack request handling and responses
 │   ├── router/                    ← Intent classification
 │   ├── planner/                   ← Deterministic task planning
+│   ├── planning/                  ← Thinking-only structured planning engine
 │   ├── executor/                  ← Tool execution and orchestration
 │   ├── tools/                     ← Git, repository, web, terminal, conversation tools
 │   ├── repository/                ← Recursive repository scanner
@@ -358,6 +359,86 @@ Debug context limits:
 DEBUG_CONTEXT_MAX_FILES=5
 DEBUG_SNIPPET_RADIUS=14
 DEBUG_CONTEXT_MAX_FILE_CHARS=5000
+```
+
+## Planning Engine
+
+The planning engine adds structured task decomposition without executing the plan. It lives in `src/planning/` so the existing `src/planner/` execution router can remain unchanged in purpose:
+
+```
+planning request
+  ↓
+TaskAnalyzer
+  ↓
+RepositoryRetrievalEngine / HybridRetriever
+  ↓
+read-only GitTool context
+  ↓
+PlanGenerator
+  ↓
+PlanValidator
+  ↓
+structured Plan
+```
+
+The engine can classify bug fixes, refactors, feature work, investigations, documentation, git tasks, testing, configuration changes, and repository exploration. It attaches ranked repository files, symbols, dependency signals, and read-only git state, then returns ordered steps with dependencies, risk, and expected outcomes.
+
+Important boundary: it does not modify files, run commands, commit, push, deploy, or call the repository modification system. Debug integration uses stacktrace/debugging signals for planning context; it does not call the LLM-backed `RepositoryDebugger.debug()` execution path.
+
+Useful local example:
+
+```python
+from src.planning import PlanningEngine
+
+plan = PlanningEngine().create_plan("Add rate limiting to Slack events", project_path=".")
+print(plan.format_markdown())
+```
+
+Task analysis example:
+
+```python
+from src.planning import analyze_task, estimate_complexity
+
+analysis = analyze_task("Fix duplicate Slack event processing")
+print(analysis.task_type)                 # Bug Fix
+print(analysis.requires_repository_context)  # True
+print(estimate_complexity("Add JWT refresh token support"))
+```
+
+Validation example:
+
+```python
+from src.planning import PlanningEngine, validate_plan
+
+plan = PlanningEngine().create_plan("Create a plan for fixing duplicate event processing")
+result = validate_plan(plan)
+print(result.valid, result.warnings, result.errors)
+```
+
+Slack examples that return structured plans only:
+
+```
+@TaskBot Create a plan for adding JWT refresh tokens
+@TaskBot How would you fix duplicate event processing?
+@TaskBot Give me an implementation plan for Slack rate limiting
+@TaskBot Create a refactor plan for provider routing
+```
+
+Example output shape:
+
+```
+Goal: Fix duplicate event processing
+Type: Bug Fix
+Complexity: Medium
+
+Plan:
+1. Locate Failing Flow
+2. Review Reproduction Signals
+3. Inspect Dependencies And State
+4. Design Minimal Fix
+5. Plan Targeted Code Update
+6. Plan Regression Coverage
+7. Plan Verification
 ```
 
 ## Repository State Management

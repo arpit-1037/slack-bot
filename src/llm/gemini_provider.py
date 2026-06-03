@@ -23,7 +23,7 @@ class GeminiProvider:
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        client = genai.Client(api_key=self._api_key())
         system = next((m["content"] for m in messages if m["role"] == "system"), "")
         convo_parts = []
         for message in messages:
@@ -38,7 +38,7 @@ class GeminiProvider:
 
         while True:
             response = client.models.generate_content(
-                model=os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
+                model=self._model(),
                 contents=current_prompt,
                 config=types.GenerateContentConfig(
                     max_output_tokens=ai_max_output_tokens("GEMINI_MAX_OUTPUT_TOKENS"),
@@ -55,3 +55,12 @@ class GeminiProvider:
             current_prompt += f"\n\nAssistant: {content}\n\nUser: {CONTINUE_PROMPT}"
 
         return "".join(parts)
+
+    def _api_key(self) -> str | None:
+        """Return the configured Gemini API key."""
+        key = os.getenv("GEMINI_API_KEY")
+        return key.strip() if key else None
+
+    def _model(self) -> str:
+        """Return the configured Gemini model."""
+        return os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
