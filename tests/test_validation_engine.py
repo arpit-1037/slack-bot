@@ -123,6 +123,8 @@ class ValidationEngineTest(unittest.TestCase):
             self.assertEqual(report.status, STATUS_FAIL)
             self.assertIn("Validation Summary", report.report_text)
             self.assertEqual((root / "sample.py").read_text(encoding="utf-8"), "value = 1\n")
+            self.assertIn("hybrid_retrieval", report.metadata)
+            self.assertIn("sample.py", [file["path"] for file in report.metadata["hybrid_retrieval"]["files"]])
 
     def test_validate_repository_can_skip_tests_and_lint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,6 +136,7 @@ class ValidationEngineTest(unittest.TestCase):
 
             self.assertEqual(report.status, STATUS_PASS)
             self.assertIn("Syntax", report.report_text)
+            self.assertIn("hybrid_retrieval", report.metadata)
 
 
 if __name__ == "__main__":

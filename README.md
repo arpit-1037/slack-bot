@@ -28,6 +28,7 @@ slack-claude-bot/
 │   ├── tools/                     ← Git, repository, web, terminal, conversation tools
 │   ├── repository/                ← Recursive repository scanner
 │   ├── retrieval/                 ← Deterministic file/symbol/snippet retrieval
+│   ├── hybrid_retrieval/          ← Keyword + dependency + semantic + git score fusion
 │   ├── embeddings/                ← Semantic chunks, embeddings, vector search
 │   ├── modification/              ← Safe targeted repository modification
 │   ├── validation/                ← Syntax, import, test, lint verification
@@ -163,25 +164,31 @@ tail -f bot.log
 
 ## Repository Retrieval Engine
 
-Repository-aware questions use a deterministic retrieval layer before any LLM call. When semantic retrieval is enabled, vector search is added as another ranking signal:
+Repository-aware questions use a deterministic retrieval layer before any LLM call. The public entrypoint stays `RepositoryRetrievalEngine`, and it now delegates ranking to `HybridRetriever` so all retrieval signals are fused before context assembly:
 
 ```
 user question
   ->
 RepositoryRetrievalEngine
   ->
-FileRanker + SymbolRanker
+HybridRetriever
   ->
-limited DependencyMapper expansion
+FileRanker keyword signal
   ->
-optional EmbeddingIndexBuilder vector search
+DependencyMapper graph signal
+  ->
+optional EmbeddingIndexBuilder semantic signal
+  ->
+RepositoryState git signal
+  ->
+ScoreFusion + RetrievalRanker
   ->
 ContextAssembler focused snippets
   ->
 LLM prompt context
 ```
 
-This layer ranks files, symbols, and snippets with path, symbol, import, dependency, working-tree, and optional semantic signals. It does not use LangChain, LangGraph, autonomous planning, or autonomous code modification.
+This layer ranks files, symbols, and snippets with path, symbol, import, dependency, working-tree, recent git history, and optional semantic signals. It does not use LangChain, LangGraph, autonomous planning, or autonomous code modification.
 
 Useful local examples:
 
@@ -198,6 +205,27 @@ for symbol in result.symbols:
     print(symbol.name, symbol.kind, symbol.file_path, symbol.score)
 
 print(result.context.format_context())
+```
+
+Hybrid score-fusion example:
+
+```python
+from src.hybrid_retrieval import HybridRetriever
+
+retriever = HybridRetriever(enable_semantic_search=True)
+result = retriever.retrieve(".", "Where do we generate temporary login links?")
+
+for line in result.explanations:
+    print(line)
+```
+
+Default hybrid weights:
+
+```
+semantic: 40%
+dependency: 30%
+keyword: 20%
+git: 10%
 ```
 
 Questions that benefit from retrieval:
@@ -220,6 +248,7 @@ RETRIEVAL_MAX_CONTEXT_CHARS=24000
 RETRIEVAL_SNIPPET_RADIUS=8
 RETRIEVAL_ENABLE_SEMANTIC=false
 EMBEDDING_SEARCH_LIMIT=6
+HYBRID_RETRIEVAL_GIT_HISTORY_LIMIT=20
 ```
 
 ## Embeddings & Vector Search

@@ -6,6 +6,8 @@ import os
 
 from src.embeddings.index_builder import EmbeddingIndexBuilder
 from src.embeddings.embedding_models import SearchResult
+from src.hybrid_retrieval.context_optimizer import ContextOptimizer
+from src.hybrid_retrieval.hybrid_retriever import HybridRetriever
 from src.repository.dependency_mapper import DependencyMapper
 from src.repository.repository_indexer import FileIndexEntry, RepositoryIndexer
 from src.repository.repository_state import RepositoryState
@@ -33,6 +35,7 @@ class RepositoryRetrievalEngine:
         dependency_limit: int | None = None,
         embedding_index_builder: EmbeddingIndexBuilder | None = None,
         enable_semantic_search: bool | None = None,
+        hybrid_retriever: HybridRetriever | None = None,
     ) -> None:
         self.indexer = indexer or RepositoryIndexer()
         self.dependency_mapper = dependency_mapper or DependencyMapper()
@@ -48,6 +51,22 @@ class RepositoryRetrievalEngine:
             if enable_semantic_search is not None
             else bool_env("RETRIEVAL_ENABLE_SEMANTIC", False)
         )
+        self.hybrid_retriever = hybrid_retriever or HybridRetriever(
+            indexer=self.indexer,
+            dependency_mapper=self.dependency_mapper,
+            file_ranker=self.file_ranker,
+            symbol_ranker=self.symbol_ranker,
+            context_optimizer=ContextOptimizer(
+                context_assembler=self.context_assembler,
+                max_files=self.max_files,
+                max_symbols=self.max_symbols,
+            ),
+            embedding_index_builder=self.embedding_index_builder,
+            max_files=self.max_files,
+            max_symbols=self.max_symbols,
+            dependency_limit=self.dependency_limit,
+            enable_semantic_search=self.enable_semantic_search,
+        )
 
     def retrieve_context(
         self,
@@ -58,41 +77,24 @@ class RepositoryRetrievalEngine:
         max_symbols: int | None = None,
     ) -> RetrievalResult:
         """Return focused repository context for a user query."""
-        index, repository_state = self._prepare_repository(project_path)
         file_limit = max_files or self.max_files
         symbol_limit = max_symbols or self.max_symbols
-        ranked_files = self._rank_and_expand_files(query, index, repository_state, file_limit)
-        ranked_symbols = self.symbol_ranker.rank_symbols(
-            user_query=query,
-            repository_index=index,
-            ranked_files=ranked_files,
-            dependency_mapper=self.dependency_mapper,
-            repository_state=repository_state,
-            limit=symbol_limit,
-        )
-        context = self.context_assembler.assemble(
+        hybrid_result = self.hybrid_retriever.retrieve(
+            project_path=project_path,
             query=query,
-            repository_index=index,
-            ranked_files=ranked_files,
-            ranked_symbols=ranked_symbols,
-            repository_state=repository_state,
+            request_id=request_id,
+            max_files=file_limit,
+            max_symbols=symbol_limit,
         )
-        terms = sorted(query_terms(query))
         log.info(
             "request_id=%s retrieval context files=%d symbols=%d snippets=%d terms=%s",
             request_id,
-            len(ranked_files),
-            len(ranked_symbols),
-            len(context.snippets),
-            ",".join(terms),
+            len(hybrid_result.files),
+            len(hybrid_result.symbols),
+            len(hybrid_result.context.snippets),
+            ",".join(hybrid_result.terms),
         )
-        return RetrievalResult(
-            query=query,
-            terms=terms,
-            files=ranked_files,
-            symbols=ranked_symbols,
-            context=context,
-        )
+        return hybrid_result.to_retrieval_result()
 
     def retrieve_files(
         self,
@@ -102,8 +104,13 @@ class RepositoryRetrievalEngine:
         limit: int | None = None,
     ) -> list[RankedFile]:
         """Return ranked files for a user query."""
-        index, repository_state = self._prepare_repository(project_path)
-        ranked_files = self._rank_and_expand_files(query, index, repository_state, limit or self.max_files)
+        ranked_files = self.hybrid_retriever.retrieve(
+            project_path=project_path,
+            query=query,
+            request_id=request_id,
+            max_files=limit or self.max_files,
+            max_symbols=self.max_symbols,
+        ).files
         log.info("request_id=%s retrieval files=%d", request_id, len(ranked_files))
         return ranked_files
 
@@ -116,16 +123,24 @@ class RepositoryRetrievalEngine:
         limit: int | None = None,
     ) -> list[RankedSymbol]:
         """Return ranked symbols for a user query."""
-        index, repository_state = self._prepare_repository(project_path)
-        files = ranked_files or self._rank_and_expand_files(query, index, repository_state, self.max_files)
-        symbols = self.symbol_ranker.rank_symbols(
-            user_query=query,
-            repository_index=index,
-            ranked_files=files,
-            dependency_mapper=self.dependency_mapper,
-            repository_state=repository_state,
-            limit=limit or self.max_symbols,
-        )
+        if ranked_files is None:
+            symbols = self.hybrid_retriever.retrieve(
+                project_path=project_path,
+                query=query,
+                request_id=request_id,
+                max_files=self.max_files,
+                max_symbols=limit or self.max_symbols,
+            ).symbols
+        else:
+            index, repository_state = self._prepare_repository(project_path)
+            symbols = self.symbol_ranker.rank_symbols(
+                user_query=query,
+                repository_index=index,
+                ranked_files=ranked_files,
+                dependency_mapper=self.dependency_mapper,
+                repository_state=repository_state,
+                limit=limit or self.max_symbols,
+            )
         log.info("request_id=%s retrieval symbols=%d", request_id, len(symbols))
         return symbols
 

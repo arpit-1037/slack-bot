@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Mapping
 
 from src.modification.modification_models import CodePatch
+from src.retrieval.retrieval_engine import RepositoryRetrievalEngine
 from src.repository.repository_indexer import RepositoryIndexer
 from src.utils.helpers import get_logger
 from src.validation.import_checker import ImportChecker
@@ -44,6 +45,7 @@ class ValidationEngine:
         test_runner: TestRunner | None = None,
         lint_runner: LintRunner | None = None,
         reporter: ValidationReporter | None = None,
+        retrieval_engine: RepositoryRetrievalEngine | None = None,
         run_tests_by_default: bool = True,
         run_lint_by_default: bool = True,
     ) -> None:
@@ -53,6 +55,7 @@ class ValidationEngine:
         self.test_runner = test_runner or TestRunner()
         self.lint_runner = lint_runner or LintRunner()
         self.reporter = reporter or ValidationReporter()
+        self.retrieval_engine = retrieval_engine
         self.run_tests_by_default = run_tests_by_default
         self.run_lint_by_default = run_lint_by_default
 
@@ -68,6 +71,11 @@ class ValidationEngine:
         start = time.monotonic()
         project_path = os.path.abspath(os.path.expanduser(project_path))
         proposed_files = self._proposed_files(patch)
+        retrieval_metadata = self._hybrid_retrieval_metadata(
+            project_path=project_path,
+            query=self._patch_retrieval_query(patch),
+            request_id=request_id,
+        )
         syntax = self.syntax_validator.validate_files(proposed_files)
         imports = self.import_checker.validate_imports(project_path, proposed_files)
 
@@ -101,7 +109,11 @@ class ValidationEngine:
             tests=test_result,
             lint=lint_result,
             extra_errors=[overlay_issue] if overlay_issue else [],
-            metadata={"request_id": request_id, "affected_paths": patch.affected_paths},
+            metadata={
+                "request_id": request_id,
+                "affected_paths": patch.affected_paths,
+                "hybrid_retrieval": retrieval_metadata,
+            },
         )
         log.info(
             "request_id=%s patch validation status=%s confidence=%.2f files=%d",
@@ -123,6 +135,11 @@ class ValidationEngine:
         start = time.monotonic()
         project_path = os.path.abspath(os.path.expanduser(project_path))
         index = self.indexer.ensure_index(project_path)
+        retrieval_metadata = self._hybrid_retrieval_metadata(
+            project_path=project_path,
+            query="repository validation syntax imports tests lint changed files",
+            request_id=request_id,
+        )
         files = {
             path: entry.get("content", "")
             for path, entry in index.items()
@@ -139,7 +156,11 @@ class ValidationEngine:
             imports=imports,
             tests=tests,
             lint=lint,
-            metadata={"request_id": request_id, "file_count": len(files)},
+            metadata={
+                "request_id": request_id,
+                "file_count": len(files),
+                "hybrid_retrieval": retrieval_metadata,
+            },
         )
         log.info(
             "request_id=%s repository validation status=%s confidence=%.2f files=%d",
@@ -242,6 +263,60 @@ class ValidationEngine:
             change.file_path.replace(os.sep, "/"): change.new_content
             for change in patch.changes
         }
+
+    def _hybrid_retrieval_metadata(
+        self,
+        project_path: str,
+        query: str,
+        request_id: str | None = None,
+    ) -> dict:
+        """Return compact hybrid retrieval metadata for validation traceability."""
+        try:
+            retrieval_engine = self.retrieval_engine or RepositoryRetrievalEngine(indexer=self.indexer)
+            self.retrieval_engine = retrieval_engine
+            result = retrieval_engine.retrieve_context(
+                project_path=project_path,
+                query=query,
+                request_id=request_id,
+                max_files=4,
+                max_symbols=8,
+            )
+        except Exception as error:
+            log.warning("request_id=%s validation retrieval metadata skipped: %s", request_id, error)
+            return {"skipped": True, "reason": str(error)}
+        return {
+            "query": query,
+            "terms": list(result.terms),
+            "files": [
+                {
+                    "path": file.path,
+                    "score": file.score,
+                    "reasons": list(file.reasons),
+                }
+                for file in result.files
+            ],
+            "symbols": [
+                {
+                    "name": symbol.name,
+                    "kind": symbol.kind,
+                    "file_path": symbol.file_path,
+                    "score": symbol.score,
+                }
+                for symbol in result.symbols
+            ],
+        }
+
+    def _patch_retrieval_query(self, patch: CodePatch) -> str:
+        """Build a validation retrieval query from patch metadata and changed paths."""
+        parts = [
+            patch.summary,
+            patch.diff_summary,
+            patch.modification_reason,
+            *patch.affected_paths,
+        ]
+        for change in patch.changes:
+            parts.extend([change.diff_summary, change.modification_reason, change.change_type])
+        return " ".join(part for part in parts if part).strip() or "patch validation"
 
     def _copy_repository(self, project_path: str, temp_root: str) -> str:
         source = Path(project_path)
