@@ -24,6 +24,7 @@ slack-claude-bot/
 │   ├── slack/                     ← Slack request handling and responses
 │   ├── router/                    ← Intent classification
 │   ├── planner/                   ← Deterministic task planning
+│   ├── query_understanding/       ← Normalization, confidence, semantic routing, follow-ups
 │   ├── planning/                  ← Thinking-only structured planning engine
 │   ├── executor/                  ← Tool execution and orchestration
 │   ├── tools/                     ← Git, repository, web, terminal, conversation tools
@@ -161,6 +162,38 @@ All activity is logged to `bot.log`, including request lifecycle ids:
 
 ```bash
 tail -f bot.log
+```
+
+## Query Understanding
+
+Slack text is normalized before legacy intent classification so typos, shorthand, and short follow-ups do not fall through to generic LLM-only answers:
+
+```
+raw Slack query
+  ->
+QueryNormalizer
+  ->
+FollowupResolver + ConversationTracker
+  ->
+TopicManager
+  ->
+IntentConfidence + SemanticRouter
+  ->
+TaskPlanner
+  ->
+Executor / selected read-only tool / LLM context
+```
+
+The layer is deterministic and additive. It repairs common developer typos such as `lst`, `braches`, `waht`, `func`, `cfg`, and `repo`; scores likely intents; maps equivalent git requests like `show branches`, `display branch list`, and `git history` to existing read-only tools; and logs original query, normalized query, resolved follow-up, topic, confidence, and selected tool.
+
+Example:
+
+```python
+from src.planner.task_planner import TaskPlanner
+
+plan = TaskPlanner().create_plan("give me the lst of braches in our project")
+print(plan.clean_task)          # give me the list of branches in our project
+print(plan.selected_tool_name)  # git.branch
 ```
 
 ## Repository Retrieval Engine

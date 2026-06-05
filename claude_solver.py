@@ -202,7 +202,13 @@ def solve_task(
 
     planner = TaskPlanner()
     executor = TaskExecutor()
-    plan = planner.create_plan(task_text, request_id=trace_id)
+    plan = planner.create_plan(
+        task_text,
+        thread_ts=thread_ts,
+        channel=channel,
+        slack_user=slack_user,
+        request_id=trace_id,
+    )
     result = executor.execute(
         plan,
         thread_ts=thread_ts,

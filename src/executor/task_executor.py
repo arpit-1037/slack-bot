@@ -10,8 +10,10 @@ from src.modification.repository_modifier import RepositoryModifier
 from src.planning.planner import PlanningEngine
 from src.planner.task_planner import TaskPlan
 from src.prompts.prompt_builder import PromptBuilder
+from src.tools.base_tool import ToolResult
 from src.tools.git_tool import GitTool
 from src.tools.repository_tool import RepositoryTool
+from src.tools.tool_executor import ToolExecutor
 from src.tools.web_search_tool import WebSearchTool
 from src.utils.helpers import get_logger
 
@@ -32,6 +34,7 @@ class TaskExecutor:
         repository_modifier: RepositoryModifier | None = None,
         code_modifier: CodeModifier | None = None,
         planning_engine: PlanningEngine | None = None,
+        tool_executor: ToolExecutor | None = None,
     ) -> None:
         self.git_tool = git_tool or GitTool()
         self.repository_tool = repository_tool or RepositoryTool()
@@ -48,6 +51,7 @@ class TaskExecutor:
             patch_generator=PatchGenerator(provider_router=self.provider_router)
         )
         self.planning_engine = planning_engine or PlanningEngine(git_tool=self.git_tool)
+        self.tool_executor = tool_executor or ToolExecutor()
 
     def execute(
         self,
@@ -59,11 +63,12 @@ class TaskExecutor:
     ) -> str:
         """Execute the planned actions and return the Slack response text."""
         log.info(
-            "request_id=%s executing plan intent=%s git_action=%s raw_git=%s git_context=%s repo_context=%s web=%s planning=%s repo_debug=%s repo_modify=%s",
+            "request_id=%s executing plan intent=%s git_action=%s raw_git=%s selected_tool=%s git_context=%s repo_context=%s web=%s planning=%s repo_debug=%s repo_modify=%s",
             request_id,
             plan.intent,
             plan.run_git_action,
             plan.return_raw_git_diff,
+            plan.selected_tool_name or "none",
             plan.needs_git_context,
             plan.needs_repository_context,
             plan.needs_web_search,
@@ -80,6 +85,18 @@ class TaskExecutor:
 
         if plan.return_raw_git_diff:
             return self.git_tool.get_raw_diff()
+
+        if plan.selected_tool_name:
+            tool_input = dict(plan.selected_tool_input)
+            tool_input.setdefault("repo_path", self.git_tool.repo_path)
+            log.info(
+                "request_id=%s executing selected tool=%s input_keys=%s",
+                request_id,
+                plan.selected_tool_name,
+                ",".join(sorted(tool_input.keys())),
+            )
+            result = self.tool_executor.execute_tool(plan.selected_tool_name, tool_input)
+            return self._format_tool_result(result)
 
         if plan.use_planning_engine:
             planning_plan = self.planning_engine.create_plan(
@@ -148,3 +165,104 @@ class TaskExecutor:
             request_id=request_id,
         )
         return self.provider_router.complete(messages, request_id=request_id)
+
+    def _format_tool_result(self, result: ToolResult) -> str:
+        """Format structured tool output for a direct Slack response."""
+        if not result.success:
+            return f"*FAILED:* `{result.tool_name}`\n{result.error}"
+
+        if result.tool_name == "git.branch":
+            return self._format_git_branch_result(result)
+        if result.tool_name == "git.log":
+            return self._format_git_log_result(result)
+        if result.tool_name == "git.status":
+            return self._format_git_status_result(result)
+        if result.tool_name == "git.diff":
+            return self._format_git_diff_result(result)
+
+        lines = [f"*Tool:* `{result.tool_name}`", "", "```"]
+        for key, value in result.data.items():
+            lines.append(f"{key}: {value}")
+        lines.append("```")
+        return "\n".join(lines)
+
+    def _format_git_branch_result(self, result: ToolResult) -> str:
+        data = result.data
+        current = str(data.get("current_branch") or "Unknown")
+        local = [str(branch) for branch in data.get("local_branches", [])]
+        remote = [str(branch) for branch in data.get("remote_branches", [])]
+
+        def mark_current(branch: str) -> str:
+            return f"* {branch}" if branch == current else f"  {branch}"
+
+        lines = [
+            "*Current Branch:*",
+            "```",
+            current,
+            "```",
+            "",
+            "*Local Branches:*",
+            "```",
+            *(mark_current(branch) for branch in local),
+            "```",
+        ]
+        if remote:
+            lines.extend(["", "*Remote Branches:*", "```", *remote, "```"])
+        return "\n".join(lines)
+
+    def _format_git_log_result(self, result: ToolResult) -> str:
+        commits = result.data.get("commits", [])
+        if not commits:
+            return "*Recent Commits:*\n```\nNo commits found.\n```"
+        lines = ["*Recent Commits:*", "```"]
+        for commit in commits:
+            lines.append(
+                f"{commit.get('short_hash')} {commit.get('summary')} "
+                f"({commit.get('author_name')}, {commit.get('authored_at')})"
+            )
+        lines.append("```")
+        return "\n".join(lines)
+
+    def _format_git_status_result(self, result: ToolResult) -> str:
+        data = result.data
+        lines = [
+            "*Git Status:*",
+            "```",
+            f"branch: {data.get('branch') or 'Unknown'}",
+            f"clean: {data.get('clean')}",
+            "",
+            "staged:",
+            *self._format_items(data.get("staged_files", [])),
+            "",
+            "unstaged:",
+            *self._format_items(data.get("unstaged_files", [])),
+            "",
+            "untracked:",
+            *self._format_items(data.get("untracked_files", [])),
+            "```",
+        ]
+        return "\n".join(lines)
+
+    def _format_git_diff_result(self, result: ToolResult) -> str:
+        data = result.data
+        changed_files = data.get("changed_files", [])
+        lines = [
+            "*Changed Files:*",
+            "```",
+            *self._format_items(changed_files),
+            "```",
+            "",
+            "*Diff Stat:*",
+            "```",
+            str(data.get("stat") or "No diff stat."),
+            "```",
+        ]
+        diff = str(data.get("diff") or "")
+        if diff:
+            lines.extend(["", "*Diff:*", "```diff", diff, "```"])
+        return "\n".join(lines)
+
+    def _format_items(self, items: object) -> list[str]:
+        if not isinstance(items, list) or not items:
+            return ["None"]
+        return [str(item) for item in items]
