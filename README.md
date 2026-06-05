@@ -37,7 +37,7 @@ slack-claude-bot/
 │   ├── validation/                ← Syntax, import, test, lint verification
 │   ├── llm/                       ← Provider fallback and continuation handling
 │   ├── prompts/                   ← System prompt and prompt builder
-│   ├── memory/                    ← Conversation history access
+│   ├── memory/                    ← Conversation history access + repository-only memory
 │   └── utils/                     ← Small shared helpers
 ├── requirements.txt
 ├── .env.example
@@ -530,6 +530,58 @@ Issues Found:
 
 Recommendations:
 - Prioritize the listed files for any follow-up fix or deeper review.
+```
+
+## Repository Memory
+
+Repository memory stores reusable project facts so repeated repository questions can be answered before rescanning the codebase. It is repository memory only: it does not store personal user information, Slack conversations, or private user preferences.
+
+```
+repository scan / execution finding
+  ->
+MemoryExtractor / MemoryUpdater
+  ->
+MemoryValidator
+  ->
+local JSON MemoryStore
+  ->
+MemoryRetriever confidence-ranked facts
+  ->
+memory hit or normal retrieval fallback
+```
+
+The default store is local JSON. In a git worktree it writes under `.git/slack-claude-bot/repository_memory.json`; outside git it falls back to `.repository_memory/memory.json`, which is ignored by the repository scanner.
+
+Useful local examples:
+
+```python
+from src.memory import RepositoryMemory
+
+memory = RepositoryMemory(".")
+memory.update_repository_memory(force=True)
+
+result = memory.retrieve_memory("Where does Slack processing begin?")
+print(memory.format_memory_result(result))
+```
+
+Execution findings can add reusable repository facts:
+
+```python
+from src.memory import RepositoryMemory
+
+memory = RepositoryMemory(".")
+memory.store_execution_finding(execution_summary)
+```
+
+Repository memory records include confidence scores, evidence, source, file path, symbol name, git branch/HEAD when known, and validity/staleness metadata. Low-confidence or missing memory falls back to the existing hybrid retrieval path.
+
+Slack examples that can answer from memory:
+
+```
+@TaskBot Where is authentication handled?
+@TaskBot Which module handles git?
+@TaskBot Where does Slack processing begin?
+@TaskBot How does planning work?
 ```
 
 ## Repository State Management

@@ -63,11 +63,13 @@ class ExecutionEngine:
             execution_plan.source_plan_id,
             execution_plan.goal,
         )
-        return self.coordinator.execute_plan(
+        summary = self.coordinator.execute_plan(
             execution_plan,
             context,
             request_id=request_id,
         )
+        self._store_execution_finding(summary, execution_plan.project_path, request_id=request_id)
+        return summary
 
     def build_execution_plan(
         self,
@@ -375,6 +377,19 @@ class ExecutionEngine:
     def _stable_id(self, prefix: str, *parts: str) -> str:
         digest = hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:12]
         return f"{prefix}-{digest}"
+
+    def _store_execution_finding(
+        self,
+        summary: ExecutionSummary,
+        project_path: str,
+        request_id: str | None = None,
+    ) -> None:
+        try:
+            from src.memory.repository_memory import RepositoryMemory
+
+            RepositoryMemory(project_path).store_execution_finding(summary)
+        except Exception as error:
+            log.warning("request_id=%s repository memory execution finding skipped: %s", request_id, error)
 
 
 _default_engine: ExecutionEngine | None = None

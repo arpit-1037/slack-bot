@@ -8,12 +8,14 @@ from src.embeddings.index_builder import EmbeddingIndexBuilder
 from src.embeddings.embedding_models import SearchResult
 from src.hybrid_retrieval.context_optimizer import ContextOptimizer
 from src.hybrid_retrieval.hybrid_retriever import HybridRetriever
+from src.memory.memory_models import MemoryResult
+from src.memory.repository_memory import RepositoryMemory
 from src.repository.dependency_mapper import DependencyMapper
 from src.repository.repository_indexer import FileIndexEntry, RepositoryIndexer
 from src.repository.repository_state import RepositoryState
 from src.retrieval.context_assembler import ContextAssembler
 from src.retrieval.file_ranker import FileRanker, query_terms
-from src.retrieval.retrieval_models import RankedFile, RankedSymbol, RetrievalResult
+from src.retrieval.retrieval_models import RankedFile, RankedSymbol, RetrievalContext, RetrievalResult
 from src.retrieval.symbol_ranker import SymbolRanker
 from src.utils.helpers import bool_env, get_logger, int_env
 
@@ -36,6 +38,9 @@ class RepositoryRetrievalEngine:
         embedding_index_builder: EmbeddingIndexBuilder | None = None,
         enable_semantic_search: bool | None = None,
         hybrid_retriever: HybridRetriever | None = None,
+        repository_memory: RepositoryMemory | None = None,
+        enable_repository_memory: bool | None = None,
+        repository_memory_confidence: float | None = None,
     ) -> None:
         self.indexer = indexer or RepositoryIndexer()
         self.dependency_mapper = dependency_mapper or DependencyMapper()
@@ -50,6 +55,17 @@ class RepositoryRetrievalEngine:
             enable_semantic_search
             if enable_semantic_search is not None
             else bool_env("RETRIEVAL_ENABLE_SEMANTIC", False)
+        )
+        self.repository_memory = repository_memory
+        self.enable_repository_memory = (
+            enable_repository_memory
+            if enable_repository_memory is not None
+            else bool_env("REPOSITORY_MEMORY_ENABLE", True)
+        )
+        self.repository_memory_confidence = (
+            repository_memory_confidence
+            if repository_memory_confidence is not None
+            else self._float_env("REPOSITORY_MEMORY_CONFIDENCE_THRESHOLD", 0.9)
         )
         self.hybrid_retriever = hybrid_retriever or HybridRetriever(
             indexer=self.indexer,
@@ -77,6 +93,16 @@ class RepositoryRetrievalEngine:
         max_symbols: int | None = None,
     ) -> RetrievalResult:
         """Return focused repository context for a user query."""
+        memory_result = self._retrieve_from_memory(project_path, query, request_id=request_id)
+        if memory_result is not None and memory_result.hit:
+            log.info(
+                "request_id=%s retrieval repository_memory_hit confidence=%.4f query=%r",
+                request_id,
+                memory_result.best_confidence,
+                query,
+            )
+            return self._memory_result_to_retrieval_result(query, memory_result)
+
         file_limit = max_files or self.max_files
         symbol_limit = max_symbols or self.max_symbols
         hybrid_result = self.hybrid_retriever.retrieve(
@@ -95,6 +121,91 @@ class RepositoryRetrievalEngine:
             ",".join(hybrid_result.terms),
         )
         return hybrid_result.to_retrieval_result()
+
+    def _retrieve_from_memory(
+        self,
+        project_path: str,
+        query: str,
+        request_id: str | None = None,
+    ) -> MemoryResult | None:
+        if not self.enable_repository_memory:
+            return None
+        try:
+            memory = self.repository_memory or RepositoryMemory(project_path)
+            result = memory.retrieve_memory(
+                query,
+                min_confidence=self.repository_memory_confidence,
+                max_results=max(self.max_files, self.max_symbols),
+            )
+        except Exception as error:
+            log.warning("request_id=%s repository memory retrieval skipped: %s", request_id, error)
+            return None
+        return result
+
+    def _memory_result_to_retrieval_result(
+        self,
+        query: str,
+        result: MemoryResult,
+    ) -> RetrievalResult:
+        files: list[RankedFile] = []
+        symbols: list[RankedSymbol] = []
+        seen_files: set[str] = set()
+        for entry in result.entries:
+            fact = entry.fact
+            score = max(1, min(100, int(entry.score * 100)))
+            reasons = ["repository-memory", *entry.reasons]
+            if fact.file_path and fact.file_path not in seen_files:
+                files.append(
+                    RankedFile(
+                        path=fact.file_path,
+                        score=score,
+                        reasons=reasons,
+                        source_metadata={
+                            "memory_fact_id": fact.id,
+                            "memory_confidence": fact.confidence,
+                            "fact_type": fact.fact_type,
+                        },
+                    )
+                )
+                seen_files.add(fact.file_path)
+            if fact.symbol_name and fact.file_path:
+                symbols.append(
+                    RankedSymbol(
+                        name=fact.symbol_name,
+                        kind=str(fact.metadata.get("kind") or "symbol"),
+                        file_path=fact.file_path,
+                        score=score,
+                        line_start=int(fact.metadata.get("line_start") or 0),
+                        line_end=int(fact.metadata.get("line_end") or 0),
+                        reasons=reasons,
+                        source_metadata={"memory_fact_id": fact.id},
+                    )
+                )
+
+        context = RetrievalContext(
+            query=query,
+            files=files,
+            symbols=symbols,
+            snippets=[],
+            repository_summary={
+                "memory": {
+                    "hit": result.hit,
+                    "best_confidence": result.best_confidence,
+                    "summary": result.summary,
+                }
+            },
+            ranking_decisions=[
+                f"Repository memory hit confidence={result.best_confidence:.4f}",
+                result.summary,
+            ],
+        )
+        return RetrievalResult(
+            query=query,
+            terms=query_terms(query),
+            files=files,
+            symbols=symbols,
+            context=context,
+        )
 
     def retrieve_files(
         self,
@@ -150,6 +261,12 @@ class RepositoryRetrievalEngine:
         repository_state = self.indexer.repository_state or self.indexer.get_repository_state(project_path)
         self.dependency_mapper.refresh(index, repository_state=repository_state)
         return index, repository_state
+
+    def _float_env(self, name: str, default: float) -> float:
+        try:
+            return float(os.getenv(name, default))
+        except (TypeError, ValueError):
+            return default
 
     def _rank_and_expand_files(
         self,

@@ -13,6 +13,7 @@ IGNORED_DIRECTORIES = {
     "build",
     "__pycache__",
     ".repository_state",
+    ".repository_memory",
 }
 
 SUPPORTED_EXTENSIONS = {

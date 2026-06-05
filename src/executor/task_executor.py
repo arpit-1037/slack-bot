@@ -5,6 +5,7 @@ from __future__ import annotations
 from src.debugging.repository_debugger import RepositoryDebugger
 from src.execution.execution_engine import ExecutionEngine
 from src.llm.provider_router import ProviderRouter
+from src.memory.repository_memory import RepositoryMemory
 from src.modification.code_modifier import CodeModifier
 from src.modification.patch_generator import PatchGenerator
 from src.modification.repository_modifier import RepositoryModifier
@@ -36,6 +37,7 @@ class TaskExecutor:
         code_modifier: CodeModifier | None = None,
         planning_engine: PlanningEngine | None = None,
         execution_engine: ExecutionEngine | None = None,
+        repository_memory: RepositoryMemory | None = None,
         tool_executor: ToolExecutor | None = None,
     ) -> None:
         self.git_tool = git_tool or GitTool()
@@ -56,6 +58,7 @@ class TaskExecutor:
         self.execution_engine = execution_engine or ExecutionEngine(
             planning_engine=self.planning_engine
         )
+        self.repository_memory = repository_memory or RepositoryMemory(self.git_tool.repo_path)
         self.tool_executor = tool_executor or ToolExecutor()
 
     def execute(
@@ -154,6 +157,10 @@ class TaskExecutor:
             git_context = self.git_tool.get_git_context()
 
         if plan.needs_repository_context:
+            memory_result = self._retrieve_repository_memory(plan.clean_task, request_id=request_id)
+            if memory_result:
+                return memory_result
+
             log.info("request_id=%s retrieving repository context", request_id)
             selection = self.repository_tool.select_context(
                 project_path=self.git_tool.repo_path,
@@ -184,6 +191,27 @@ class TaskExecutor:
             request_id=request_id,
         )
         return self.provider_router.complete(messages, request_id=request_id)
+
+    def _retrieve_repository_memory(self, task: str, request_id: str | None = None) -> str:
+        """Return a formatted repository-memory hit, or an empty string on miss."""
+        try:
+            result = self.repository_memory.retrieve_memory(task, min_confidence=0.9)
+        except Exception as error:
+            log.warning("request_id=%s repository memory lookup skipped: %s", request_id, error)
+            return ""
+        if not result.hit:
+            log.info(
+                "request_id=%s repository memory miss confidence=%.4f",
+                request_id,
+                result.best_confidence,
+            )
+            return ""
+        log.info(
+            "request_id=%s repository memory hit confidence=%.4f",
+            request_id,
+            result.best_confidence,
+        )
+        return self.repository_memory.format_memory_result(result)
 
     def _format_tool_result(self, result: ToolResult) -> str:
         """Format structured tool output for a direct Slack response."""
