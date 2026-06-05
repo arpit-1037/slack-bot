@@ -26,6 +26,7 @@ slack-claude-bot/
 │   ├── planner/                   ← Deterministic task planning
 │   ├── query_understanding/       ← Normalization, confidence, semantic routing, follow-ups
 │   ├── planning/                  ← Thinking-only structured planning engine
+│   ├── execution/                 ← Safe read-only execution of investigation plans
 │   ├── executor/                  ← Tool execution and orchestration
 │   ├── tools/                     ← Git, repository, web, terminal, conversation tools
 │   ├── repository/                ← Recursive repository scanner
@@ -472,6 +473,63 @@ Plan:
 5. Plan Targeted Code Update
 6. Plan Regression Coverage
 7. Plan Verification
+```
+
+## Execution Engine
+
+The execution engine consumes structured plans and executes bounded read-only investigation steps through the existing tool ecosystem. It does not modify files, commit, push, deploy, run arbitrary shell commands, or call the repository modification workflow.
+
+```
+investigation request
+  ↓
+PlanningEngine structured Plan
+  ↓
+ExecutionValidator safety checks
+  ↓
+StepExecutor + existing read-only ToolExecutor
+  ↓
+ResultAggregator findings report
+```
+
+Allowed execution tools are limited to repository search/stats, file reads/metadata/tree inspection, read-only git status/log/diff/branch checks, and validation runners with timeouts. Explicit test command overrides are rejected so execution cannot become arbitrary shell access.
+
+Useful local example:
+
+```python
+from src.planning import PlanningEngine
+from src.execution import ExecutionEngine
+
+plan = PlanningEngine().create_plan("Investigate duplicate Slack events", project_path=".")
+summary = ExecutionEngine().execute_plan(plan, project_path=".")
+print(summary.format_markdown())
+```
+
+Slack examples that execute read-only investigations:
+
+```
+@TaskBot Investigate duplicate Slack events
+@TaskBot Analyze duplicate event handling
+@TaskBot Review recent repository changes
+@TaskBot Find authentication flow
+@TaskBot Check why tests are failing
+```
+
+Example findings shape:
+
+```
+Investigation Summary
+Files Examined:
+- src/slack/slack_handler.py
+- src/executor/task_executor.py
+
+Commits Reviewed:
+- abc123 Fix Slack retry handling
+
+Issues Found:
+- validation.pytest reported failing tests
+
+Recommendations:
+- Prioritize the listed files for any follow-up fix or deeper review.
 ```
 
 ## Repository State Management

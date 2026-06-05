@@ -37,6 +37,7 @@ class TaskPlan:
     needs_repository_context: bool = False
     needs_web_search: bool = False
     use_planning_engine: bool = False
+    use_execution_engine: bool = False
     use_repository_debugger: bool = False
     use_repository_modifier: bool = False
     query_analysis: QueryAnalysis | None = None
@@ -122,6 +123,20 @@ class TaskPlanner:
             self._store_plan_state(plan, thread_ts, channel, slack_user)
             return plan
 
+        intent = self.intent_router.classify(routed_task)
+        if intent == "project_execution":
+            log.info("request_id=%s read-only execution request detected", request_id)
+            plan = TaskPlan(
+                original_task=task_text,
+                clean_task=routed_task,
+                intent=intent,
+                normalized_task=analysis.normalized_query,
+                use_execution_engine=True,
+                query_analysis=analysis,
+            )
+            self._store_plan_state(plan, thread_ts, channel, slack_user)
+            return plan
+
         if analysis.selected_tool_name:
             log.info(
                 "request_id=%s semantic tool route selected tool=%s confidence=%.2f",
@@ -141,7 +156,6 @@ class TaskPlanner:
             self._store_plan_state(plan, thread_ts, channel, slack_user)
             return plan
 
-        intent = self.intent_router.classify(routed_task)
         log.info("request_id=%s detected intent=%s", request_id, intent)
 
         if self._is_contextual_explanation(analysis):
@@ -218,6 +232,7 @@ class TaskPlanner:
             needs_git_context=needs_git_context,
             needs_repository_context=intent == "project_retrieval",
             needs_web_search=intent == "web",
+            use_execution_engine=intent == "project_execution",
             use_repository_debugger=intent == "project_debug",
             use_repository_modifier=intent == "project_modify",
             query_analysis=analysis,

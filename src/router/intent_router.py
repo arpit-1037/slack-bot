@@ -27,6 +27,9 @@ class IntentRouter:
         if is_git_action_query(task_lower):
             return "git_action"
 
+        if self._is_project_execution_query(task_lower):
+            return "project_execution"
+
         if self._is_project_modification_query(task_lower):
             return "project_modify"
 
@@ -101,6 +104,31 @@ class IntentRouter:
             "import", "dependency", ".py", ".js", ".ts", ".php", "src/",
         ]
         return any(signal in task_lower for signal in repository_signals)
+
+    def _is_project_execution_query(self, task_lower: str) -> bool:
+        """Return True for multi-step read-only repository investigations."""
+        repository_signals = [
+            "repo", "repository", "project", "codebase", "file", "files",
+            "module", "class", "function", "method", "service", "handler",
+            "controller", "route", "auth", "authentication", "jwt", "login",
+            "middleware", "database", "slack", "event", "events", "test",
+            "tests", "pytest", "src/", ".py", ".js", ".ts", ".php",
+        ]
+        execution_signals = [
+            "investigate", "analyze", "analyse", "diagnose", "trace",
+            "root cause", "check why", "check whether", "review recent",
+            "recent repository changes", "recent project changes",
+        ]
+        if any(signal in task_lower for signal in execution_signals):
+            return any(signal in task_lower for signal in repository_signals)
+
+        if re.search(r"\bfind\b.*\bflow\b", task_lower):
+            return any(signal in task_lower for signal in repository_signals)
+
+        if re.search(r"\breview\b.*\b(?:file|files|change|changes|code|flow)\b", task_lower):
+            return any(signal in task_lower for signal in repository_signals)
+
+        return False
 
     def _is_project_modification_query(self, task_lower: str) -> bool:
         """Return True when the user is asking for repository code changes."""
