@@ -802,6 +802,54 @@ VALIDATION_LINT_TIMEOUT_SECONDS=60
 VALIDATION_TEST_COMMAND=python3 -m unittest discover -s tests
 ```
 
+## Evaluation & Benchmarking
+
+The deterministic benchmark framework lives in `tests/evaluation/` and measures:
+
+- routing and git tool selection
+- repository, hybrid, and semantic retrieval
+- repository-memory hits
+- workflow selection
+- conversation context retention
+- planning coverage
+- read-only execution success
+
+Run every suite:
+
+```bash
+python3 -m tests.evaluation
+```
+
+Run selected suites without saving history:
+
+```bash
+python3 -m tests.evaluation \
+  --no-store \
+  --suite routing \
+  --suite retrieval \
+  --fail-under 0.90
+```
+
+Use `--json` for CI output. Persisted runs default to
+`.benchmark_runs/benchmark_runs.jsonl`; set `BENCHMARK_STORE_PATH` or pass
+`--store` to choose another location. The command returns a non-zero exit code
+when the overall pass rate is below `--fail-under`, so the same command works in
+GitHub Actions, GitLab CI, and Jenkins.
+
+The optional Slack admin hook is approval-gated and is not wired into normal
+request handling:
+
+```python
+from tests.evaluation import run_admin_benchmark_command
+
+response = run_admin_benchmark_command(
+    command="run benchmarks",
+    slack_user="U123",
+    approved_users={"U123"},
+    project_path=".",
+)
+```
+
 ---
 
 ## ⚠️ Common Issues
