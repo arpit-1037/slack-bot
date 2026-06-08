@@ -255,7 +255,8 @@ class TaskPlanner:
         state = self.conversation_tracker.get_state(thread_ts, channel, slack_user)
         followup = self.followup_resolver.resolve_followup(normalized, state)
         resolved = followup.resolved_query
-        topic = self.topic_manager.detect_topic(resolved, state)
+        topic_state = None if followup.raw_git_command_detected else state
+        topic = self.topic_manager.detect_topic(resolved, topic_state)
         semantic_result = self.semantic_router.route_query(resolved)
         classifier_intent = self.intent_router.classify(resolved) if resolved else "empty"
         intent_results = score_intent_confidence(
@@ -274,7 +275,7 @@ class TaskPlanner:
         confidence = semantic_result.confidence if selected_tool_name else selected.confidence
 
         log.info(
-            "request_id=%s query understanding original=%r normalized=%r resolved=%r topic=%s intent=%s confidence=%.2f selected_tool=%s followup=%s",
+            "request_id=%s query understanding original=%r normalized=%r resolved=%r topic=%s intent=%s confidence=%.2f selected_tool=%s followup=%s raw_git_command_detected=%s",
             request_id,
             original,
             normalized,
@@ -284,6 +285,7 @@ class TaskPlanner:
             confidence,
             selected_tool_name or "none",
             followup.is_followup,
+            followup.raw_git_command_detected,
         )
         return QueryAnalysis(
             original_query=original,

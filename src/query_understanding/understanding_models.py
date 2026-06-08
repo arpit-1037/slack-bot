@@ -54,6 +54,7 @@ class FollowupResolution:
     inherited_topic: str = ""
     inherited_tool_name: str = ""
     reason: str = ""
+    raw_git_command_detected: bool = False
 
 
 @dataclass(frozen=True)

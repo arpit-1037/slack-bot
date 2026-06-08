@@ -10,8 +10,15 @@ from pathlib import Path
 
 from src.executor.task_executor import TaskExecutor
 from src.planner.task_planner import TaskPlanner
-from src.query_understanding import normalize_query, route_query, score_intent_confidence
-from src.tools.git_tool import GitTool
+from src.query_understanding import (
+    ConversationState,
+    FollowupResolver,
+    is_raw_git_command,
+    normalize_query,
+    route_query,
+    score_intent_confidence,
+)
+from src.tools.git_tool import GitTool, extract_git_commands
 
 
 class QueryNormalizationTest(unittest.TestCase):
@@ -22,6 +29,82 @@ class QueryNormalizationTest(unittest.TestCase):
 
         self.assertEqual(original, "givem e the lst of braches in repo")
         self.assertEqual(normalized, "give me the list of branches in repository")
+
+
+class RawGitCommandTest(unittest.TestCase):
+    """Raw git commands remain isolated from conversation follow-up context."""
+
+    RAW_COMMANDS = [
+        "git log",
+        "git status",
+        "git diff",
+        "git branch",
+        "git show",
+        "git checkout",
+        "git switch",
+        "git commit",
+        "git push",
+        "git pull",
+        "git fetch",
+        "git merge",
+        "git rebase",
+        "git stash",
+        "git reset",
+        "git revert",
+        "git branch -a",
+        "git diff HEAD~1 HEAD",
+    ]
+
+    def test_detects_supported_raw_git_commands(self) -> None:
+        for query in self.RAW_COMMANDS:
+            with self.subTest(query=query):
+                self.assertTrue(is_raw_git_command(query))
+
+    def test_does_not_classify_conversational_requests_as_raw_git_commands(self) -> None:
+        for query in ["why?", "show me that code", "try again", "what about that file?"]:
+            with self.subTest(query=query):
+                self.assertFalse(is_raw_git_command(query))
+
+    def test_raw_git_commands_are_never_modified_by_followup_resolver(self) -> None:
+        resolver = FollowupResolver()
+        state = ConversationState(
+            thread_key="raw-git-test",
+            active_topic="git",
+            active_repository_task="<@U123> show recent commits",
+            active_tool_name="git.log",
+            last_normalized_query="<@U123> show recent commits",
+            last_resolved_query="<@U123> show recent commits",
+            last_tool_name="git.log",
+        )
+
+        for query in self.RAW_COMMANDS:
+            with self.subTest(query=query):
+                result = resolver.resolve_followup(query, state)
+
+                self.assertEqual(result.original_query, query)
+                self.assertEqual(result.resolved_query, query)
+                self.assertFalse(result.is_followup)
+                self.assertTrue(result.raw_git_command_detected)
+                self.assertEqual(result.inherited_topic, "")
+                self.assertEqual(result.inherited_tool_name, "")
+
+    def test_real_followups_still_use_conversation_context(self) -> None:
+        resolver = FollowupResolver()
+        state = ConversationState(
+            thread_key="real-followup-test",
+            active_topic="repository",
+            active_repository_task="inspect src/router/intent_router.py",
+            active_tool_name="repository.file_search",
+            last_resolved_query="inspect src/router/intent_router.py",
+        )
+
+        for query in ["why?", "show me that code", "try again", "what about that file?"]:
+            with self.subTest(query=query):
+                result = resolver.resolve_followup(query, state)
+
+                self.assertTrue(result.is_followup)
+                self.assertFalse(result.raw_git_command_detected)
+                self.assertIn("src/router/intent_router.py", result.resolved_query)
 
 
 class SemanticRoutingTest(unittest.TestCase):
@@ -113,6 +196,37 @@ class PlannerUnderstandingIntegrationTest(unittest.TestCase):
         self.assertTrue(followup.needs_git_context)
         self.assertFalse(followup.return_raw_git_diff)
         self.assertIsNone(followup.selected_tool_name)
+
+    def test_raw_git_command_bypasses_existing_thread_context(self) -> None:
+        planner = TaskPlanner()
+        thread = "thread-raw-git-command"
+        planner.create_plan(
+            "show branches",
+            thread_ts=thread,
+            channel="C-query-understanding",
+            slack_user="U-query-understanding",
+        )
+
+        with self.assertLogs("src.planner.task_planner", level="INFO") as logs:
+            plan = planner.create_plan(
+                "git log",
+                thread_ts=thread,
+                channel="C-query-understanding",
+                slack_user="U-query-understanding",
+                request_id="raw-git-test",
+            )
+
+        self.assertEqual(plan.query_analysis.original_query, "git log")
+        self.assertEqual(plan.query_analysis.resolved_query, "git log")
+        self.assertFalse(plan.query_analysis.followup.is_followup)
+        self.assertEqual(plan.query_analysis.followup.inherited_topic, "")
+        self.assertEqual(plan.query_analysis.topic.previous_topic, "")
+        self.assertEqual(plan.clean_task, "git log")
+        self.assertEqual(plan.intent, "git_action")
+        self.assertEqual(extract_git_commands(plan.clean_task), [["log"]])
+        self.assertTrue(
+            any("raw_git_command_detected=True" in message for message in logs.output)
+        )
 
 
 class ToolExecutionIntegrationTest(unittest.TestCase):

@@ -4,6 +4,7 @@ from src.query_understanding.conversation_tracker import ConversationTracker
 from src.query_understanding.followup_resolver import FollowupResolver, resolve_followup
 from src.query_understanding.intent_confidence import score_intent_confidence
 from src.query_understanding.query_normalizer import normalize_query
+from src.query_understanding.raw_git_command import is_raw_git_command
 from src.query_understanding.semantic_router import SemanticRouter, route_query
 from src.query_understanding.topic_manager import TopicManager
 from src.query_understanding.understanding_models import (
@@ -24,6 +25,7 @@ __all__ = [
     "SemanticRouter",
     "TopicManager",
     "TopicState",
+    "is_raw_git_command",
     "normalize_query",
     "resolve_followup",
     "route_query",

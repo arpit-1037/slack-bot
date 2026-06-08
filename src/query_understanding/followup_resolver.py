@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import re
 
+from src.query_understanding.raw_git_command import is_raw_git_command
 from src.query_understanding.understanding_models import ConversationState, FollowupResolution
 
 _EXPLANATION_FOLLOWUPS = {"why", "why?", "how", "how?"}
 _RETRY_FOLLOWUPS = {"try again", "again", "rerun", "run it again", "continue"}
 _EXPAND_FOLLOWUPS = {"show more", "more", "expand", "details"}
+_REFERENTIAL_FOLLOWUP_PATTERNS = (
+    re.compile(r"^(?:show|give)\s+me\s+(?:that|this|those|these)\b"),
+    re.compile(r"^what about (?:that|this|the|those|these|it)\b"),
+)
 
 
 class FollowupResolver:
@@ -22,6 +27,13 @@ class FollowupResolver:
         """Return a resolved query when the text depends on prior context."""
         normalized = re.sub(r"\s+", " ", (query or "").strip())
         lower = normalized.lower()
+        if is_raw_git_command(normalized):
+            return FollowupResolution(
+                original_query=normalized,
+                resolved_query=normalized,
+                raw_git_command_detected=True,
+                reason="raw git command",
+            )
         if not normalized or state is None:
             return FollowupResolution(normalized, normalized)
 
@@ -58,6 +70,16 @@ class FollowupResolver:
                 inherited_topic=state.active_topic,
                 inherited_tool_name=state.active_tool_name or state.last_tool_name,
                 reason="expand previous goal",
+            )
+
+        if any(pattern.search(lower) for pattern in _REFERENTIAL_FOLLOWUP_PATTERNS):
+            return FollowupResolution(
+                original_query=normalized,
+                resolved_query=f"{normalized} about {previous}",
+                is_followup=True,
+                inherited_topic=state.active_topic,
+                inherited_tool_name=state.active_tool_name or state.last_tool_name,
+                reason="referential follow-up",
             )
 
         if len(lower.split()) <= 3 and state.active_topic != "general":

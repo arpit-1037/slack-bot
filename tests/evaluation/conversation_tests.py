@@ -48,15 +48,30 @@ class ConversationEvaluator:
             "followups_resolved": followups,
         }
         expected = dict(case.expected_output)
-        topic_ok = actual["active_topic"] == expected["active_topic"]
-        tool_ok = actual["active_tool_name"] == expected["active_tool_name"]
-        followup_ok = all(followups)
+        topic_ok = (
+            "active_topic" not in expected
+            or actual["active_topic"] == expected["active_topic"]
+        )
+        tool_ok = (
+            "active_tool_name" not in expected
+            or actual["active_tool_name"] == expected["active_tool_name"]
+        )
+        expected_followups = expected.get("followups_resolved")
+        followup_ok = (
+            followups == expected_followups
+            if expected_followups is not None
+            else all(followups)
+        )
+        resolved_ok = (
+            "last_resolved_query" not in expected
+            or actual["last_resolved_query"] == expected["last_resolved_query"]
+        )
         retained_terms = expected.get("retained_terms", [])
         retention_ok = all(
             term.lower() in actual["last_resolved_query"].lower()
             for term in retained_terms
         )
-        passed = topic_ok and tool_ok and followup_ok and retention_ok
+        passed = topic_ok and tool_ok and followup_ok and resolved_ok and retention_ok
         return BenchmarkObservation(
             actual_output=actual,
             passed=passed,
@@ -106,5 +121,27 @@ def create_conversation_suite() -> BenchmarkSuite:
                 },
                 category="followup_context",
             ),
+            *[
+                BenchmarkCase(
+                    id=f"conversation-raw-git-{index}",
+                    name=f"Raw git command remains unchanged: {query}",
+                    input_data={"turns": ["show branches", query]},
+                    expected_output={
+                        "active_topic": "git",
+                        "last_resolved_query": query,
+                        "followups_resolved": [False],
+                    },
+                    category="raw_git_context_isolation",
+                )
+                for index, query in enumerate(
+                    (
+                        "git log",
+                        "git status",
+                        "git branch -a",
+                        "git diff HEAD~1 HEAD",
+                    ),
+                    start=1,
+                )
+            ],
         ],
     )
