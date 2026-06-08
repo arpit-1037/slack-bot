@@ -38,6 +38,7 @@ class TaskPlan:
     needs_web_search: bool = False
     use_planning_engine: bool = False
     use_execution_engine: bool = False
+    use_workflow_engine: bool = False
     use_repository_debugger: bool = False
     use_repository_modifier: bool = False
     query_analysis: QueryAnalysis | None = None
@@ -132,6 +133,7 @@ class TaskPlanner:
                 intent=intent,
                 normalized_task=analysis.normalized_query,
                 use_execution_engine=True,
+                use_workflow_engine=True,
                 query_analysis=analysis,
             )
             self._store_plan_state(plan, thread_ts, channel, slack_user)
@@ -233,6 +235,7 @@ class TaskPlanner:
             needs_repository_context=intent == "project_retrieval",
             needs_web_search=intent == "web",
             use_execution_engine=intent == "project_execution",
+            use_workflow_engine=intent == "project_execution",
             use_repository_debugger=intent == "project_debug",
             use_repository_modifier=intent == "project_modify",
             query_analysis=analysis,

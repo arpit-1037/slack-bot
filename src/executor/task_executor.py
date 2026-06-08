@@ -18,6 +18,7 @@ from src.tools.repository_tool import RepositoryTool
 from src.tools.tool_executor import ToolExecutor
 from src.tools.web_search_tool import WebSearchTool
 from src.utils.helpers import get_logger
+from src.workflows.workflow_engine import WorkflowEngine
 
 log = get_logger(__name__)
 
@@ -38,6 +39,7 @@ class TaskExecutor:
         planning_engine: PlanningEngine | None = None,
         execution_engine: ExecutionEngine | None = None,
         repository_memory: RepositoryMemory | None = None,
+        workflow_engine: WorkflowEngine | None = None,
         tool_executor: ToolExecutor | None = None,
     ) -> None:
         self.git_tool = git_tool or GitTool()
@@ -59,6 +61,9 @@ class TaskExecutor:
             planning_engine=self.planning_engine
         )
         self.repository_memory = repository_memory or RepositoryMemory(self.git_tool.repo_path)
+        self.workflow_engine = workflow_engine or WorkflowEngine(
+            repository_memory=self.repository_memory
+        )
         self.tool_executor = tool_executor or ToolExecutor()
 
     def execute(
@@ -71,7 +76,7 @@ class TaskExecutor:
     ) -> str:
         """Execute the planned actions and return the Slack response text."""
         log.info(
-            "request_id=%s executing plan intent=%s git_action=%s raw_git=%s selected_tool=%s git_context=%s repo_context=%s web=%s planning=%s execution=%s repo_debug=%s repo_modify=%s",
+            "request_id=%s executing plan intent=%s git_action=%s raw_git=%s selected_tool=%s git_context=%s repo_context=%s web=%s planning=%s execution=%s workflow=%s repo_debug=%s repo_modify=%s",
             request_id,
             plan.intent,
             plan.run_git_action,
@@ -82,6 +87,7 @@ class TaskExecutor:
             plan.needs_web_search,
             plan.use_planning_engine,
             plan.use_execution_engine,
+            getattr(plan, "use_workflow_engine", False),
             plan.use_repository_debugger,
             plan.use_repository_modifier,
         )
@@ -114,6 +120,14 @@ class TaskExecutor:
                 request_id=request_id,
             )
             return planning_plan.format_markdown()
+
+        if getattr(plan, "use_workflow_engine", False):
+            summary = self.workflow_engine.run_workflow(
+                plan.clean_task,
+                project_path=self.git_tool.repo_path,
+                request_id=request_id,
+            )
+            return summary.format_markdown()
 
         if plan.use_execution_engine:
             planning_plan = self.planning_engine.create_plan(

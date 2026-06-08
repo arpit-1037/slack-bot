@@ -27,6 +27,7 @@ slack-claude-bot/
 │   ├── query_understanding/       ← Normalization, confidence, semantic routing, follow-ups
 │   ├── planning/                  ← Thinking-only structured planning engine
 │   ├── execution/                 ← Safe read-only execution of investigation plans
+│   ├── workflows/                 ← Controlled autonomous analysis workflows
 │   ├── executor/                  ← Tool execution and orchestration
 │   ├── tools/                     ← Git, repository, web, terminal, conversation tools
 │   ├── repository/                ← Recursive repository scanner
@@ -530,6 +531,50 @@ Issues Found:
 
 Recommendations:
 - Prioritize the listed files for any follow-up fix or deeper review.
+```
+
+## Controlled Workflows
+
+The workflow engine selects and runs predefined autonomous analysis workflows. It is autonomous analysis only: it does not modify files, commit, push, deploy, delete files, or run arbitrary shell commands.
+
+```
+user task
+  ->
+WorkflowSelector
+  ->
+WorkflowBuilder
+  ->
+WorkflowValidator
+  ->
+WorkflowExecutor
+  ->
+ExecutionEngine
+  ->
+structured workflow report
+```
+
+Predefined workflows include bug investigation, authentication analysis, git analysis, repository exploration, architecture analysis, test failure investigation, dependency investigation, and performance investigation.
+
+Useful local example:
+
+```python
+from src.workflows import WorkflowEngine
+
+summary = WorkflowEngine().run_workflow(
+    "Investigate duplicate Slack events",
+    project_path=".",
+)
+print(summary.format_markdown())
+```
+
+Slack examples that select workflows automatically:
+
+```
+@TaskBot Investigate duplicate events
+@TaskBot Analyze authentication flow
+@TaskBot Review repository architecture
+@TaskBot Explain test failures
+@TaskBot Analyze recent repository changes
 ```
 
 ## Repository Memory
